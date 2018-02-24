@@ -33,24 +33,33 @@ from contextlib import contextmanager
 import json
 import logging
 import math
+import os
+from pdb import set_trace
 import sys
+from tempfile import TemporaryDirectory
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from biosppy.signals.ecg import ecg as biosppy_ecg
 from biosppy.utils import ReturnTuple
+from cardinal_pythonlib.datetimefunc import format_datetime
 from cardinal_pythonlib.json.serialize import JsonClassEncoder, json_decode
 from cardinal_pythonlib.logs import main_only_quicksetup_rootlogger
 import numpy as np
 from pendulum import Pendulum
 from PyQt5.QtCore import (
+    pyqtRemoveInputHook,
+    # pyqtRestoreInputHook,
     pyqtSignal,
     QObject,
+    QRectF,
     Qt,
     QTimer,
 )
 from PyQt5.QtGui import (
+    QColor,
     QPalette,
+    QPen,
 )
 from PyQt5.QtWidgets import (
     QApplication,
@@ -65,7 +74,20 @@ from PyQt5.QtWidgets import (
     QRadioButton,
     QWidget,
 )
+import pyqtgraph
 from pyqtgraph import PlotWidget
+from pyqtgraph.graphicsItems import PlotItem
+from pyqtgraph.exporters import ImageExporter, SVGExporter
+from pyqtgraph.parametertree import Parameter
+# https://www.reportlab.com/docs/reportlab-userguide.pdf
+from reportlab.pdfgen.canvas import Canvas
+from reportlab.graphics.shapes import Drawing
+from reportlab.platypus.flowables import Flowable, Image
+# ... watch out; there are both shapes.Image and flowables.Image
+from reportlab.platypus import SimpleDocTemplate, Paragraph
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.units import cm
 from scipy.signal import firwin, iirnotch, lfilter
 from serial import (  # pip install pyserial
     EIGHTBITS,
@@ -75,8 +97,11 @@ from serial import (  # pip install pyserial
     STOPBITS_ONE
 )
 from serial.tools.list_ports import comports
+from svglib.svglib import svg2rlg
 
 log = logging.getLogger(__name__)
+# pyqtgraph.setConfigOption('background', 'w')  # white background
+# pyqtgraph.setConfigOption('foreground', 'k')  # black foreground
 
 # All these to match ecg.cpp in one way or another:
 CMD_SOURCE_ANALOGUE = "A"
@@ -136,12 +161,21 @@ DEFAULT_NOTCH_Q = 25.0  # Q = w0/bw, so for 50Hz +/- 1 Hz (BW 2Hz), Q = 50/2
 # See also:
 # - http://www.medteq.info/med/ECGFilters
 
+USE_PDF_EXPORT = True
+USE_SVG_EXPORT = False
 DTYPE = "float64"
 FLOATS_TYPE = Union[List[float], np.array]
 JSON_FILE_FILTER = "JSON Files (*.json);;All files (*)"
+BITMAP_FILE_FILTER = "PNG files (*.png);;All files (*)"
+SVG_FILE_FILTER = "SVG files (*.svg);;All files (*)"
+PDF_FILE_FILTER = "PDF files (*.pdf);;All files (*)"
 UPDATE_ECG_EVERY_MS = 20  # 50 Hz
 UPDATE_ANALYTICS_EVERY_MS = 500  # 0.5 Hz
 MICROSECONDS_PER_S = 1000000
+ECG_PEN = QPen(QColor(255, 0, 0))
+ECG_PEN.setCosmetic(True)  # don't scale the pen width!
+ECG_PEN.setWidth(1)
+DATETIME_FORMAT = "%a %d %B %Y, %H:%M"  # e.g. Wed 24 July 2013, 20:04
 
 
 # =============================================================================
@@ -168,6 +202,24 @@ def normal_round(x: float, dp: int = 0) -> float:
     return x
 
 
+def fit_image(src_width: float,
+              src_height: float,
+              available_width: float,
+              available_height: float) -> Tuple[float, float]:
+    src_aspect_ratio = src_width / src_height
+    dest_aspect_ratio = available_width / available_height
+    if src_aspect_ratio >= dest_aspect_ratio:
+        # Source image is "wider" in aspect ratio than the destination, so
+        # its width will be limiting.
+        final_width = available_width
+        final_height = final_width / src_aspect_ratio
+    else:
+        # Source image is "taller". Its height is limiting.
+        final_height = available_height
+        final_width = final_height * src_aspect_ratio
+    return final_width, final_height
+
+
 @contextmanager
 def block_qt_signals_from(x: QObject) -> None:
     x.blockSignals(True)
@@ -175,13 +227,12 @@ def block_qt_signals_from(x: QObject) -> None:
     x.blockSignals(False)
 
 
-class JsonEncoder(json.JSONEncoder):
-    """
-    JSON encoder that copes with Pendulum.
-    """
-    def default(self, obj):
-        if isinstance(obj, Pendulum):
-            return
+def debug_trace():
+    """Set a tracepoint in the Python debugger that works with Qt."""
+    # https://stackoverflow.com/questions/1736015/debugging-a-pyqt4-app
+    pyqtRemoveInputHook()
+    set_trace()
+    # When you've finished stepping: pyqtRestoreInputHook()
 
 
 # =============================================================================
@@ -362,7 +413,7 @@ class AdvancedWindow(QDialog):
             x=ecg_info['heart_rate_ts'],
             y=ecg_info['heart_rate']
         )
-        if len(t) >= 2:
+        if t.size >= 2:
             # Set the same X scale as the ECG.
             # (Otherwise it's out of alignment, as HR isn't calculated over
             # the same time range as the ECG itself -- slightly shorter.)
@@ -421,13 +472,15 @@ class MainWindow(QWidget):
                  hr_dp: int = 0) -> None:
         super().__init__(parent=parent)
         self.app = app
+        self.ecg = app.ecg
         self.hr_dp = hr_dp
 
         layout = QGridLayout()
         self.plot_ecg = PlotWidget(
-            labels={"bottom": "time (s)"}
+            labels={"bottom": "time (s)"},
+            background='w'  # white
         )
-        self.curve = self.plot_ecg.plot()
+        self.curve = self.plot_ecg.plot(pen=ECG_PEN)
         
         # Person
 
@@ -455,14 +508,17 @@ class MainWindow(QWidget):
         save_picture_btn = QPushButton("Save picture")
         save_picture_btn.clicked.connect(self.on_save_picture)
 
-        continuous_btn = QPushButton("Continuous")
-        continuous_btn.clicked.connect(self.on_continuous)
+        self.continuous_btn = QPushButton("Continuous")
+        self.continuous_btn.setEnabled(False)  # until Arduino awake
+        self.continuous_btn.clicked.connect(self.on_continuous)
 
-        capture_time_btn = QPushButton("Capture buffer length")
-        capture_time_btn.clicked.connect(self.on_capture_for_time)
+        self.capture_time_btn = QPushButton("Capture buffer length")
+        self.capture_time_btn.setEnabled(False)  # until Arduino awake
+        self.capture_time_btn.clicked.connect(self.on_capture_for_time)
 
-        stop_btn = QPushButton("Stop capture")
-        stop_btn.clicked.connect(self.on_stop)
+        self.stop_btn = QPushButton("Stop capture")
+        self.stop_btn.setEnabled(False)  # until Arduino awake
+        self.stop_btn.clicked.connect(self.on_stop)
 
         buffer_duration_lbl = QLabel("Buffer duration (s)")
         self.buffer_duration_edit = QLineEdit()
@@ -555,9 +611,9 @@ class MainWindow(QWidget):
         layout.addWidget(self.comment_edit, comment_row, 1, 1, person_n_cols)
 
         action_row = comment_row + 1
-        layout.addWidget(continuous_btn, action_row, 0)
-        layout.addWidget(capture_time_btn, action_row, 1)
-        layout.addWidget(stop_btn, action_row, 2)
+        layout.addWidget(self.continuous_btn, action_row, 0)
+        layout.addWidget(self.capture_time_btn, action_row, 1)
+        layout.addWidget(self.stop_btn, action_row, 2)
         layout.addWidget(buffer_duration_lbl, action_row, 3)
         layout.addWidget(self.buffer_duration_edit, action_row, 4)
 
@@ -648,14 +704,19 @@ class MainWindow(QWidget):
         self.update_from_settings(trigger_ecg_update=trigger_ecg_update)
         self.ecg_mode_btn.click()
 
+    def on_arduino_awake(self) -> None:
+        self.continuous_btn.setEnabled(True)
+        self.capture_time_btn.setEnabled(True)
+        self.stop_btn.setEnabled(True)
+
     def update_from_settings(self, trigger_ecg_update: bool = True) -> None:
-        self.app.ecg.enable_updates(False)
+        self.ecg.enable_updates(False)
         self.on_invert()
         self.on_centre()
         self.on_lowpass()
         self.on_highpass()
         self.on_notch()
-        self.app.ecg.enable_updates(True)
+        self.ecg.enable_updates(True)
         if trigger_ecg_update:
             self.trigger_ecg_update()
 
@@ -671,15 +732,15 @@ class MainWindow(QWidget):
             self.hr_lbl.setText("?")
             return
 
-        hr_array = ecg_info["heart_rate"]
-        if len(hr_array) > 0:
+        hr_array = ecg_info["heart_rate"]  # type: np.array
+        if hr_array.size > 0:
             mean_hr = np.mean(hr_array)
             self.hr_lbl.setText(str(normal_round(mean_hr, self.hr_dp)))
         else:
             self.hr_lbl.setText("?")
 
     def on_person_changed(self) -> None:
-        self.app.ecg.set_person_details(
+        self.ecg.set_person_details(
             name=self.name_edit.text(),
             details=self.details_edit.text(),
             comment=self.comment_edit.text(),
@@ -693,7 +754,7 @@ class MainWindow(QWidget):
         )
         if not filename:
             return
-        self.app.ecg.save_json(filename)
+        self.ecg.save_json(filename)
 
     def on_load_data(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(
@@ -703,7 +764,7 @@ class MainWindow(QWidget):
         )
         if not filename:
             return
-        ecg = self.app.ecg
+        ecg = self.ecg
         if not ecg.load_json(filename):  # will emit signals to update the ECG graph  # noqa
             QMessageBox.warning(self, "Load failure",
                                 "Failed to load JSON file")
@@ -757,44 +818,188 @@ class MainWindow(QWidget):
         # ... deals with e.g. hide/show dialogue boxes
 
     def on_save_picture(self) -> None:
-        pass # ***
+        if USE_PDF_EXPORT:
+            filename_filter = PDF_FILE_FILTER
+        elif USE_SVG_EXPORT:
+            filename_filter = SVG_FILE_FILTER
+        else:
+            filename_filter = BITMAP_FILE_FILTER
+        filename, _ = QFileDialog.getSaveFileName(
+            parent=self,
+            caption="Save image as",
+            filter=filename_filter,
+        )
+        if not filename:
+            return
+
+        if USE_PDF_EXPORT:
+            self._save_pdf(filename)
+            return
+
+        plotitem = self.plot_ecg.getPlotItem()
+        if USE_SVG_EXPORT:
+            self._save_svg(plotitem, filename)
+        else:
+            self._save_bitmap(plotitem, filename)
+
+    def _save_pdf(self, filename: str) -> None:
+        log.info("Exporting PDF to {!r}".format(filename))
+
+        margin = 1.5 * cm
+        pagesize = landscape(A4)  # width, height
+        pagewidth, pageheight = pagesize
+        contentwidth = pagewidth - 2 * margin
+        contentheight = pageheight - 2 * margin
+        max_imagewidth = contentwidth
+        max_imageheight = contentheight - 2 * cm  # guess for text height
+
+        with TemporaryDirectory() as tempdir:
+            # We keep this tempdir going, because ReportLab sometimes (e.g.
+            # with flowables.Image) doesn't read the file when the Image is
+            # created, but at PDF write time.
+
+            # Get the ECG as a reportlab Drawing
+            plotitem = self.plot_ecg.getPlotItem()
+            as_svg = False
+            if as_svg:
+                # Good things: colour, transparency
+                # Bad things: scale goes wrong, including time scale!
+                tmp_filename = os.path.join(tempdir, "tmp.svg")
+                self._save_svg(plotitem, tmp_filename)
+                # ecg_svg_drawing = Image(filename)  # doesn't work
+                ecg = svg2rlg(tmp_filename)  # type: Drawing
+                # The next bit is just empirical and not great:
+                scale_factor = 0.75
+                ecg.width *= scale_factor
+                ecg.height *= scale_factor
+                ecg.scale(scale_factor, scale_factor)
+            else:
+                tmp_filename = os.path.join(tempdir, "tmp.png")
+                width_px, height_px = self._save_bitmap(plotitem, tmp_filename)
+                imagewidth, imageheight = fit_image(
+                    src_width=width_px,
+                    src_height=height_px,
+                    available_width=max_imagewidth,
+                    available_height=max_imageheight
+                )
+                aspect_ratio = width_px / height_px
+                ecg = Image(tmp_filename, width=imagewidth, height=imageheight)
+
+            # Make the PDF
+            styles = getSampleStyleSheet()
+            style = styles["Normal"]
+            doc = SimpleDocTemplate(
+                filename,
+                pagesize=pagesize,
+                title=self.ecg.person_name,
+                author="Software by Rudolf Cardinal",
+                subject="ECG (nondiagnostic; for fun only)",
+                creator="RN Cardinal / Arduino ECG demo",
+                leftMargin=margin,
+                rightMargin=margin,
+                topMargin=margin,
+                bottomMargin=margin,
+            )
+            settings = self.ecg.get_settings_description()
+            story = [
+                # Spacer(1, 0.5 * cm),
+                Paragraph(
+                    "Name: <b>{}</b> // Details: {} // Comments: {}".format(
+                        self.ecg.person_name or "—",
+                        self.ecg.person_details or "—",
+                        self.ecg.person_comment or "—",
+                    ),
+                    style
+                ),
+                Paragraph(
+                    "ECG taken when: <b>{}</b>".format(
+                        format_datetime(self.ecg.latest_datetime,
+                                        DATETIME_FORMAT)),
+                    style
+                ),
+                Paragraph(
+                    "<i>Not of diagnostic grade; for fun only. "
+                    "Display settings: {}</i>".format(settings),
+                    style
+                ),
+                ecg,
+            ]  # type: List[Flowable]
+            doc.build(story)
+
+    @staticmethod
+    def _save_svg(plotitem: PlotItem, filename: str) -> None:
+        log.info("Writing SVG to {!r}".format(filename))
+        exporter = SVGExporter(plotitem)
+        # WATCH OUT. The SVGExporter is a bit buggy (e.g. axes move and
+        # are mis-scaled).
+        exporter.export(filename)
+
+    @staticmethod
+    def _save_bitmap(plotitem: PlotItem, filename: str) -> Tuple[int, int]:
+        log.info("Writing bitmap to {!r}".format(filename))
+        exporter = ImageExporter(plotitem)
+        parameters = exporter.parameters()  # type: Parameter
+        # Export it at the same resolution as it is on screen.
+        # (This is the least bad option...)
+        sourcerect = exporter.getSourceRect()  # type: QRectF
+        width = int(sourcerect.width())
+        height = int(sourcerect.height())
+        # To compensate for crash due to bug
+        #   https://github.com/pyqtgraph/pyqtgraph/issues/538
+        # (in which, when you set e.g. width, it autosets e.g. height according
+        # to the aspect ratio -- sometimes leading to float rather than int,
+        # and to a crash...)
+        # ... we disable signals.
+        # MOREOVER, it won't write the value if it's the same according to
+        # "=="; so, we have the problem that, for example, the width starts
+        # out as 1837.0, and we can't write 1837 (int). So, this nonsense:
+        parameters.param('width').setValue(
+            None, blockSignal=exporter.widthChanged)
+        parameters.param('width').setValue(
+            width, blockSignal=exporter.widthChanged)
+        parameters.param('height').setValue(
+            None, blockSignal=exporter.heightChanged)
+        parameters.param('height').setValue(
+            height, blockSignal=exporter.heightChanged)
+        exporter.export(filename)
+        return width, height
 
     def rescale(self) -> None:
         self.plot_ecg.autoRange()
-        self.plot_ecg.setXRange(0.0, self.app.ecg.buffer_duration_s)
+        self.plot_ecg.setXRange(0.0, self.ecg.buffer_duration_s)
 
     def set_graph_ranges_for_ecg(self) -> None:
-        self.plot_ecg.setXRange(0.0, self.app.ecg.buffer_duration_s)
+        self.plot_ecg.setXRange(0.0, self.ecg.buffer_duration_s)
         self.plot_ecg.setYRange(MIN_INPUT, MAX_INPUT)
 
     def set_graph_ranges_for_time_test(self) -> None:
         self.plot_ecg.autoRange()
-        self.plot_ecg.setXRange(0.0, self.app.ecg.buffer_duration_s)
+        self.plot_ecg.setXRange(0.0, self.ecg.buffer_duration_s)
 
     def on_continuous(self) -> None:
-        self.app.ecg.sample_continuous()
+        self.ecg.sample_continuous()
 
     def on_capture_for_time(self) -> None:
-        duration_s = self.app.ecg.buffer_duration_s
-        n_samples = self.app.ecg.get_n_samples_from_duration(duration_s)
-        self.app.ecg.sample_number(n_samples)
+        duration_s = self.ecg.buffer_duration_s
+        n_samples = self.ecg.get_n_samples_from_duration(duration_s)
+        self.ecg.sample_number(n_samples)
 
     def on_stop(self) -> None:
-        self.app.ecg.quiet()
+        self.ecg.quiet()
 
     def on_clear(self) -> None:
-        self.app.ecg.clear_data()
+        self.ecg.clear_data()
 
     def on_ecg_mode(self) -> None:
         self.sine_freq_lbl.setEnabled(False)
         self.sine_freq_edit.setEnabled(False)
-        self.app.ecg.set_source_analogue()
+        self.ecg.set_source_analogue()
         self.set_graph_ranges_for_ecg()
 
     def on_time_mode(self) -> None:
         self.sine_freq_lbl.setEnabled(False)
         self.sine_freq_edit.setEnabled(False)
-        self.app.ecg.set_source_time()
+        self.ecg.set_source_time()
         self.set_graph_ranges_for_time_test()
 
     def on_sine_mode(
@@ -808,8 +1013,8 @@ class MainWindow(QWidget):
         )
         self.sine_freq_lbl.setEnabled(True)
         self.sine_freq_edit.setEnabled(True)
-        self.app.ecg.set_sine_frequency(frequency_hz=freq_hz)
-        self.app.ecg.set_source_sine_generator()
+        self.ecg.set_sine_frequency(frequency_hz=freq_hz)
+        self.ecg.set_source_sine_generator()
         self.set_graph_ranges_for_ecg()
 
     def on_buffer_duration(self) -> None:
@@ -819,20 +1024,20 @@ class MainWindow(QWidget):
             minimum=MIN_ECG_DURATION_S,
             maximum=MAX_ECG_DURATION_S
         )
-        self.app.ecg.set_processing_options(
+        self.ecg.set_processing_options(
             buffer_duration_s=buffer_duration_s
         )
 
     def on_invert(self) -> None:
-        self.app.ecg.set_processing_options(
+        self.ecg.set_processing_options(
             invert=self.invert_btn.isChecked(),
         )
 
     def trigger_ecg_update(self, with_analytics: bool = True) -> None:
-        self.app.ecg.trigger_update(force_update=with_analytics)
+        self.ecg.trigger_update(force_update=with_analytics)
 
     def on_centre(self) -> None:
-        self.app.ecg.set_processing_options(
+        self.ecg.set_processing_options(
             centre_on_mean=self.centre_btn.isChecked()
         )
 
@@ -856,7 +1061,7 @@ class MainWindow(QWidget):
             use_lowpass_filter and not use_highpass_filter)
         self.lowpass_numtaps_edit.setEnabled(
             use_lowpass_filter and not use_highpass_filter)
-        self.app.ecg.set_processing_options(
+        self.ecg.set_processing_options(
             use_lowpass_filter=use_lowpass_filter,
             lowpass_cutoff_freq_hz=lowpass_cutoff_freq_hz,
             lowpass_numtaps=lowpass_numtaps
@@ -884,7 +1089,7 @@ class MainWindow(QWidget):
             use_lowpass_filter and not use_highpass_filter)
         self.lowpass_numtaps_edit.setEnabled(
             use_lowpass_filter and not use_highpass_filter)
-        self.app.ecg.set_processing_options(
+        self.ecg.set_processing_options(
             use_highpass_filter=use_highpass_filter,
             highpass_cutoff_freq_hz=highpass_cutoff_freq_hz,
             highpass_numtaps=highpass_numtaps
@@ -908,7 +1113,7 @@ class MainWindow(QWidget):
         self.notch_freq_edit.setEnabled(use_notch_filter)
         self.notch_q_lbl.setEnabled(use_notch_filter)
         self.notch_q_edit.setEnabled(use_notch_filter)
-        self.app.ecg.set_processing_options(
+        self.ecg.set_processing_options(
             use_notch_filter=use_notch_filter,
             notch_freq_hz=notch_freq_hz,
             notch_quality_factor=notch_q
@@ -1039,7 +1244,7 @@ class EcgController(QObject):
             sys.exit(1)
 
     def on_arduino_awake(self) -> None:
-        self.set_sample_frequency(self.sampling_freq_hz)
+        self.reset_sample_frequency()
 
     def get_n_samples_from_duration(self, duration_s: float) -> int:
         return int(duration_s / self.sampling_period_s) + 1
@@ -1134,6 +1339,26 @@ class EcgController(QObject):
 
         if trigger_update:
             self.trigger_update(force_update=True)
+
+    def get_settings_description(self) -> str:
+        d = []  # type: List[str]
+        if self.use_highpass_filter and self.use_lowpass_filter:
+            d.append("Bandpass filter [{}, {}] Hz.".format(
+                self.highpass_cutoff_freq_hz, self.lowpass_cutoff_freq_hz
+            ))
+        elif self.use_highpass_filter:
+            d.append("High-pass filter [{}, +∞] Hz.".format(
+                self.highpass_cutoff_freq_hz
+            ))
+        elif self.use_lowpass_filter:
+            d.append("Low-pass filter [0, {}] Hz.".format(
+                self.lowpass_cutoff_freq_hz
+            ))
+        if self.use_notch_filter:
+            d.append("Notch filter removing {n} Hz.".format(
+                n=self.notch_freq_hz
+            ))
+        return " ".join(d)
 
     def set_buffer_duration(self, duration_s: float) -> None:
         self.buffer_duration_s = duration_s
@@ -1253,7 +1478,13 @@ class EcgController(QObject):
     def read_data(self, greedy: bool = True) -> None:
         data_changed = False
         while self.port.inWaiting() > 0:
-            line = self.port.readline().decode(SERIAL_ENCODING).strip()
+            try:
+                binary_line = self.port.readline()
+                line = binary_line.decode(SERIAL_ENCODING).strip()
+            except UnicodeDecodeError:
+                log.warning(
+                    "Bad contents from Arduino: {!r}".format(binary_line))
+                continue
             if line == RESP_HELLO:
                 log.info("Arduino is awake")
                 self.arduino_awake.emit()
@@ -1317,11 +1548,16 @@ class EcgController(QObject):
     def set_sample_frequency(self, frequency_hz: float) -> None:
         self.send_command("{} {}".format(CMD_SAMPLE_FREQUENCY, frequency_hz))
 
+    def reset_sample_frequency(self) -> None:
+        self.set_sample_frequency(self.sampling_freq_hz)
+
     def sample_continuous(self) -> None:
+        self.reset_sample_frequency()
         self.send_command(CMD_SAMPLE_CONTINUOUS)
 
     def sample_number(self, n_samples: int) -> None:
         assert n_samples > 0
+        self.reset_sample_frequency()
         self.send_command("{} {}".format(CMD_SAMPLE_NUMBER, n_samples))
 
     def quiet(self) -> None:
@@ -1353,6 +1589,7 @@ class EcgApplication(QApplication):
         self.last_analytics_update_at = self.last_ecg_update_at
         self.timer.timeout.connect(self.ecg.read_data)
         self.ecg.data_changed.connect(self.on_data_changed)
+        self.ecg.arduino_awake.connect(self.mw.on_arduino_awake)
         self.start_capture()
 
     def exec_(self) -> int:
@@ -1447,6 +1684,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-
-
-# *** will dump core on right-click image export, so make an export button that works

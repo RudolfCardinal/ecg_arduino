@@ -18,7 +18,12 @@
 
 // #define DEBUG
 
-const char strVersion[] = "Cardinal Arduino ECG controller v0.1";
+#include <Arduino.h>
+
+const char strVersion[] = "Arduino ECG controller v0.1, by Rudolf Cardinal, 2018-02-24";
+const int ECG_PIN = A1;
+const int VOLTAGE_RANGE = DEFAULT;  // 3.3 V reference
+const char strHardwareInfo[] = "Expects a device providing 0 to +3.3V on Arduino analogue input pin A1";
 
 /*
 ===============================================================================
@@ -80,7 +85,6 @@ A good library instead:
 
 */
 
-#include <Arduino.h>
 #include <avr/boot.h>
 #include <avr/pgmspace.h>
 #include <util/atomic.h> // for ATOMIC_BLOCK
@@ -146,7 +150,6 @@ volatile bool continuous_sampling;
 volatile unsigned int samples_to_go;    // >8 bits; needs ATOMIC_BLOCK
 volatile bool missed_sample;
 
-const int ECG_PIN = A1;
 const float MAX_OUTPUT = 1024;
 const float HALF_OUTPUT = MAX_OUTPUT / 2;
 const float MAX_TIMER_RESOLUTION_S = 2;
@@ -562,10 +565,12 @@ void setup()
     // Hardware config
     pinMode(ECG_PIN, INPUT);
     // ... analogue pins can be configured as digital
-    // ... https://www.arduino.cc/en/Tutorial/DigitalPins
-    analogReference(INTERNAL); // 1.1 V reference.
+    //     https://www.arduino.cc/en/Tutorial/DigitalPins
+    analogReference(VOLTAGE_RANGE);
     // ... sets the voltage used as the top of the input range
-    // ... https://www.arduino.cc/reference/en/language/functions/analog-io/analogreference/
+    //     https://www.arduino.cc/reference/en/language/functions/analog-io/analogreference/
+    // ... and the DFRobot sensor provides an output of 0 to 3.3 V:
+    //     https://www.dfrobot.com/wiki/index.php/Heart_Rate_Monitor_Sensor_SKU:_SEN0213
 
     // Starting values
 #ifdef DEBUG
@@ -587,4 +592,5 @@ void setup()
     resetInputBuffers();
     Serial.println(respHello);
     info(strVersion);
+    info(strHardwareInfo);
 }
