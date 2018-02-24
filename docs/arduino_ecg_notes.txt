@@ -1,0 +1,54 @@
+Examples:
+- Generic AD8232:
+    - https://learn.sparkfun.com/tutorials/ad8232-heart-rate-monitor-hookup-guide
+- DFRobot Gravity heart rate sensor:
+    - https://www.dfrobot.com/product-1510.html
+    - https://www.dfrobot.com/wiki/index.php?title=Heart_Rate_Monitor_Sensor_SKU:_SEN0213
+- The AD8232 chip:
+    - http://www.analog.com/en/products/application-specific/medical/ecg/ad8232.html
+
+PHYSICAL CONNECTIONS
+- Arduino: 5V, GND, and A1 (analogue in)
+  From its wiki:
+
+    GND = BLACK
+    VCC = 5V = RED
+    analogue out = BLUE
+
+  From the Arduino UNO pinouts at
+  http://forum.arduino.cc/index.php?topic=146315.0
+  and UNOV3PDF.png, there is no convenient 3-pin connector that has these pins.
+
+  The breadboard has VERTICAL POWER STRIPS and HORIZONTAL CONNECTION STRIPS.
+
+  Just plug the Arduino directly into the 3-pin cable from the sensor shield.
+
+SOFTWARE: IDE
+- Main .ino file must have the same name as its containing directory.
+
+SKIP THE IDE. COMPILE DIRECTLY.
+- See "build_upload" script, which calls "ino build", which looks in "src/"
+  etc.
+
+ARDUINO INTERRUPT USAGE
+- Don't use the serial port
+- https://learn.adafruit.com/multi-tasking-the-arduino-part-2/interrupt-etiquette
+- http://www.gammon.com.au/interrupts
+
+PYTHON / CYTHON
+- http://bastibe.de/2012-11-02-real-time-signal-processing-in-python.html
+- https://www.youtube.com/watch?v=0ALKGR0I5MA -- interesting, not yet watched!
+  General lecture on sound/signal processing in Python.
+- GNU Radio, inc.
+    https://hackaday.com/2015/11/11/getting-started-with-gnu-radio/
+
+
+PYTHON LIBRARIES USED
+
+    biosppy==0.5.1              # ECG processing
+    cardinal_pythonlib==1.0.10
+    matplotlib==2.1.2           # required by biosppy but not installed by it
+    pyqtgraph==0.10.0
+    PyQt5==5.10
+    pyserial==3.4
+    scipy==1.0.0

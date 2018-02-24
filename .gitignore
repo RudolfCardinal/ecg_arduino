@@ -1,0 +1,6 @@
+.idea/*
+demo_images/*
+dfrobot/*
+ecg_arduino/.build/*
+ecg_arduino/lib/*
+junk_data/
