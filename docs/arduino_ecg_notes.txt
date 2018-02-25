@@ -8,7 +8,7 @@ Examples:
     - http://www.analog.com/en/products/application-specific/medical/ecg/ad8232.html
 
 PHYSICAL CONNECTIONS
-- Arduino: 5V, GND, and A1 (analogue in)
+- Arduino UNO: 5V, GND, and A1 (analogue in)
   From its wiki:
 
     GND = BLACK

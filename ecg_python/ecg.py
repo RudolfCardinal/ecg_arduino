@@ -32,18 +32,25 @@ import argparse
 from contextlib import contextmanager
 import json
 import logging
-import math
 import os
 from pdb import set_trace
 import sys
 from tempfile import TemporaryDirectory
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 from biosppy.signals.ecg import ecg as biosppy_ecg
 from biosppy.utils import ReturnTuple
+from cardinal_pythonlib.argparse_func import RawDescriptionArgumentDefaultsHelpFormatter  # noqa
 from cardinal_pythonlib.datetimefunc import format_datetime
+from cardinal_pythonlib.dsp import (
+    lowpass_filter,
+    highpass_filter,
+    bandpass_filter,
+    notch_filter,
+)
 from cardinal_pythonlib.json.serialize import JsonClassEncoder, json_decode
+from cardinal_pythonlib.maths_py import normal_round_float
 from cardinal_pythonlib.logs import main_only_quicksetup_rootlogger
 import numpy as np
 from pendulum import Pendulum
@@ -74,13 +81,11 @@ from PyQt5.QtWidgets import (
     QRadioButton,
     QWidget,
 )
-import pyqtgraph
 from pyqtgraph import PlotWidget
 from pyqtgraph.graphicsItems import PlotItem
 from pyqtgraph.exporters import ImageExporter, SVGExporter
 from pyqtgraph.parametertree import Parameter
 # https://www.reportlab.com/docs/reportlab-userguide.pdf
-from reportlab.pdfgen.canvas import Canvas
 from reportlab.graphics.shapes import Drawing
 from reportlab.platypus.flowables import Flowable, Image
 # ... watch out; there are both shapes.Image and flowables.Image
@@ -88,7 +93,6 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.units import cm
-from scipy.signal import firwin, iirnotch, lfilter
 from serial import (  # pip install pyserial
     EIGHTBITS,
     PARITY_NONE,
@@ -100,8 +104,14 @@ from serial.tools.list_ports import comports
 from svglib.svglib import svg2rlg
 
 log = logging.getLogger(__name__)
-# pyqtgraph.setConfigOption('background', 'w')  # white background
-# pyqtgraph.setConfigOption('foreground', 'k')  # black foreground
+
+# =============================================================================
+# Constants
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Communication with Arduino
+# -----------------------------------------------------------------------------
 
 # All these to match ecg.cpp in one way or another:
 CMD_SOURCE_ANALOGUE = "A"
@@ -126,11 +136,15 @@ MAX_INPUT = 1024  # https://www.gammon.com.au/adc
 # Characteristic of our serial comms:
 SERIAL_ENCODING = "ascii"
 
+# -----------------------------------------------------------------------------
+# ECG capture
+# -----------------------------------------------------------------------------
+
 # Our fixed preferences:
 SAMPLING_FREQ_HZ = 300.0  # twice the "pro" top frequency of 150 Hz (the Nyquist frequency for 150 Hz signals)  # noqa
 POLLING_TIMER_PERIOD_MS = 5
 MIN_FILTER_FREQ_HZ = 0
-MAX_FILTER_FREQ_HZ = SAMPLING_FREQ_HZ * 4.0
+MAX_FILTER_FREQ_HZ = SAMPLING_FREQ_HZ
 MIN_NUMTAPS = 1
 MIN_NOTCH_Q = 1.0  # no idea
 MAX_NOTCH_Q = 1000.0  # no idea
@@ -161,10 +175,13 @@ DEFAULT_NOTCH_Q = 25.0  # Q = w0/bw, so for 50Hz +/- 1 Hz (BW 2Hz), Q = 50/2
 # See also:
 # - http://www.medteq.info/med/ECGFilters
 
+# -----------------------------------------------------------------------------
+# Cosmetics
+# -----------------------------------------------------------------------------
+
 USE_PDF_EXPORT = True
 USE_SVG_EXPORT = False
 DTYPE = "float64"
-FLOATS_TYPE = Union[List[float], np.array]
 JSON_FILE_FILTER = "JSON Files (*.json);;All files (*)"
 BITMAP_FILE_FILTER = "PNG files (*.png);;All files (*)"
 SVG_FILE_FILTER = "SVG files (*.svg);;All files (*)"
@@ -186,20 +203,6 @@ def current_milli_time() -> int:
     # time.time() is in seconds, with fractions (usually)
     # https://stackoverflow.com/questions/5998245/get-current-time-in-milliseconds-in-python  # noqa
     return int(round(time.time() * 1000))
-
-
-def normal_round(x: float, dp: int = 0) -> float:
-    # Hmpf.
-    if not math.isfinite(x):
-        return x
-    factor = pow(10, dp)
-    x = x * factor
-    if x >= 0:
-        x = math.floor(x + 0.5)
-    else:
-        x = math.ceil(x - 0.5)
-    x = x / factor
-    return x
 
 
 def fit_image(src_width: float,
@@ -236,90 +239,8 @@ def debug_trace():
 
 
 # =============================================================================
-# Filters
+# Input validation
 # =============================================================================
-
-def normalized_frequency(f: float, sampling_freq: float) -> float:
-    return f / (sampling_freq / 2.0)
-    # e.g. see https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.iirnotch.html  # noqa
-    # Principle:
-    # - if maximum frequency of interest is f, then you should sample at the
-    #   Nyquist frequency of 2f;
-    # - conversely, if you sample at 2f, then the normalized frequency is the
-    #   range [0, 1] for the frequency range [0, f].
-
-
-def lowpass_filter(data: FLOATS_TYPE,
-                   sampling_freq_hz: float,
-                   cutoff_freq_hz: float = DEFAULT_LOWPASS_FREQ_HZ,
-                   numtaps: int = DEFAULT_LOWPASS_NUMTAPS) -> FLOATS_TYPE:
-    """
-    Apply a low-pass filter to the data.
-    Returns filtered data.
-
-    Note: number of filter taps = filter order + 1
-    """
-    coeffs = firwin(
-        numtaps=numtaps,
-        cutoff=normalized_frequency(cutoff_freq_hz, sampling_freq_hz),
-        pass_zero=True
-    )  # coefficients of a finite impulse response (FIR) filter using window method  # noqa
-    filtered_data = lfilter(b=coeffs, a=1.0, x=data)
-    return filtered_data
-
-
-def highpass_filter(data: FLOATS_TYPE,
-                    sampling_freq_hz: float,
-                    cutoff_freq_hz: float = DEFAULT_LOWPASS_FREQ_HZ,
-                    numtaps: int = DEFAULT_LOWPASS_NUMTAPS) -> FLOATS_TYPE:
-    """
-    Apply a high-pass filter to the data.
-    Returns filtered data.
-    """
-    coeffs = firwin(
-        numtaps=numtaps,
-        cutoff=normalized_frequency(cutoff_freq_hz, sampling_freq_hz),
-        pass_zero=False
-    )
-    filtered_data = lfilter(b=coeffs, a=1.0, x=data)
-    return filtered_data
-
-
-def bandpass_filter(data: FLOATS_TYPE,
-                    sampling_freq_hz: float,
-                    lower_freq_hz: float,
-                    upper_freq_hz: float,
-                    numtaps: int = DEFAULT_LOWPASS_NUMTAPS) -> FLOATS_TYPE:
-    """
-    Apply a band-pass filter to the data.
-    Returns filtered data.
-    """
-    f1 = normalized_frequency(lower_freq_hz, sampling_freq_hz)
-    f2 = normalized_frequency(upper_freq_hz, sampling_freq_hz)
-    coeffs = firwin(
-        numtaps=numtaps,
-        cutoff=[f1, f2],
-        pass_zero=False
-    )
-    filtered_data = lfilter(b=coeffs, a=1.0, x=data)
-    return filtered_data
-
-
-def notch_filter(data: FLOATS_TYPE,
-                 sampling_freq_hz: float,
-                 notch_freq_hz: float = DEFAULT_NOTCH_FREQ_HZ,
-                 quality_factor: float = DEFAULT_NOTCH_Q) -> FLOATS_TYPE:
-    """
-    Design and use a notch (band reject) filter to filter the data.
-    Returns filtered data.
-    """
-    b, a = iirnotch(
-        w0=normalized_frequency(notch_freq_hz, sampling_freq_hz),
-        Q=quality_factor
-    )
-    filtered_data = lfilter(b=b, a=a, x=data)
-    return filtered_data
-
 
 def get_valid_float(x: str, default: float,
                     minimum: float = None, maximum: float = None) -> float:
@@ -352,6 +273,7 @@ def get_valid_int(x: str, default: int,
 # =============================================================================
 
 class AdvancedWindow(QDialog):
+    # noinspection PyArgumentList
     def __init__(self,
                  ecg_info: ReturnTuple,
                  parent: QWidget = None) -> None:
@@ -374,9 +296,9 @@ class AdvancedWindow(QDialog):
         """
         super().__init__(parent=parent)
         self.ecg_info = ecg_info
-        t = ecg_info['ts']  # type: np.array
-        y = ecg_info['filtered']  # type: np.array
-        rr_peak_indices = ecg_info['rpeaks']  # type: np.array
+        t = ecg_info['ts']  # type: np.ndarray
+        y = ecg_info['filtered']  # type: np.ndarray
+        rr_peak_indices = ecg_info['rpeaks']  # type: np.ndarray
         r_peak_t = np.take(t, rr_peak_indices)
         r_peak_y = np.take(y, rr_peak_indices)
 
@@ -466,6 +388,8 @@ class AdvancedWindow(QDialog):
 # =============================================================================
 
 class MainWindow(QWidget):
+    # To suppress lots of: "Cannot find reference 'connect' in 'function'":
+    # noinspection PyUnresolvedReferences,PyArgumentList
     def __init__(self,
                  app: "EcgApplication",
                  parent: QWidget = None,
@@ -732,10 +656,10 @@ class MainWindow(QWidget):
             self.hr_lbl.setText("?")
             return
 
-        hr_array = ecg_info["heart_rate"]  # type: np.array
+        hr_array = ecg_info["heart_rate"]  # type: np.ndarray
         if hr_array.size > 0:
-            mean_hr = np.mean(hr_array)
-            self.hr_lbl.setText(str(normal_round(mean_hr, self.hr_dp)))
+            mean_hr = float(np.mean(hr_array))
+            self.hr_lbl.setText(str(normal_round_float(mean_hr, self.hr_dp)))
         else:
             self.hr_lbl.setText("?")
 
@@ -747,6 +671,7 @@ class MainWindow(QWidget):
         )
 
     def on_save_data(self) -> None:
+        # noinspection PyArgumentList
         filename, _ = QFileDialog.getSaveFileName(
             parent=self,
             caption="Save data as",
@@ -757,6 +682,7 @@ class MainWindow(QWidget):
         self.ecg.save_json(filename)
 
     def on_load_data(self) -> None:
+        # noinspection PyArgumentList
         filename, _ = QFileDialog.getOpenFileName(
             parent=self,
             caption="Load data",
@@ -766,6 +692,7 @@ class MainWindow(QWidget):
             return
         ecg = self.ecg
         if not ecg.load_json(filename):  # will emit signals to update the ECG graph  # noqa
+            # noinspection PyCallByClass,PyArgumentList
             QMessageBox.warning(self, "Load failure",
                                 "Failed to load JSON file")
 
@@ -824,6 +751,7 @@ class MainWindow(QWidget):
             filename_filter = SVG_FILE_FILTER
         else:
             filename_filter = BITMAP_FILE_FILTER
+        # noinspection PyArgumentList
         filename, _ = QFileDialog.getSaveFileName(
             parent=self,
             caption="Save image as",
@@ -882,7 +810,6 @@ class MainWindow(QWidget):
                     available_width=max_imagewidth,
                     available_height=max_imageheight
                 )
-                aspect_ratio = width_px / height_px
                 ecg = Image(tmp_filename, width=imagewidth, height=imageheight)
 
             # Make the PDF
@@ -919,7 +846,7 @@ class MainWindow(QWidget):
                 ),
                 Paragraph(
                     "<i>Not of diagnostic grade; for fun only. "
-                    "Display settings: {}</i>".format(settings),
+                    "Settings: {}</i>".format(settings),
                     style
                 ),
                 ecg,
@@ -1125,6 +1052,7 @@ class MainWindow(QWidget):
     def view_advanced(self) -> None:
         ecg_info = self.app.get_ecg_info()
         if ecg_info is None:
+            # noinspection PyCallByClass,PyArgumentList
             QMessageBox.warning(self, "Advanced plots", "Insufficient data")
             return
         aw = AdvancedWindow(ecg_info=ecg_info, parent=self)
@@ -1211,7 +1139,7 @@ class EcgController(QObject):
         self.latest_datetime = None  # type: Pendulum
         self.buffer_size = self.get_n_samples_from_duration(buffer_duration_s)
         self.cached_len = None  # type: int
-        self.cached_time_axis = None  # type: np.array
+        self.cached_time_axis = None  # type: np.ndarray
         self.times = []  # type: List[int]
         self.data = []  # type: List[int]
         self.clear_data()
@@ -1241,7 +1169,7 @@ class EcgController(QObject):
         except SerialException as e:
             log.critical("Failed to open serial port {!r}:\n{}".format(
                 port_device, e))
-            sys.exit(1)
+            self.port = None
 
     def on_arduino_awake(self) -> None:
         self.reset_sample_frequency()
@@ -1341,7 +1269,9 @@ class EcgController(QObject):
             self.trigger_update(force_update=True)
 
     def get_settings_description(self) -> str:
-        d = []  # type: List[str]
+        d = [
+            "Sampling frequency: {} Hz.".format(self.sampling_freq_hz)
+        ]
         if self.use_highpass_filter and self.use_lowpass_filter:
             d.append("Bandpass filter [{}, {}] Hz.".format(
                 self.highpass_cutoff_freq_hz, self.lowpass_cutoff_freq_hz
@@ -1379,14 +1309,14 @@ class EcgController(QObject):
             # ... if there are e.g. 5 too many, this does data[5:], which drops
             # 5 items
             self.cached_len = None  # type: int
-            self.cached_time_axis = None  # type: np.array
+            self.cached_time_axis = None  # type: np.ndarray
         self.trigger_update(True)
 
     def clear_data(self) -> None:
         # Don't store a bunch of zeroes; funny things happen with the filter.
         # Beware empty data: filters may crash.
         self.cached_len = None  # type: int
-        self.cached_time_axis = None  # type: np.array
+        self.cached_time_axis = None  # type: np.ndarray
         self.times = []  # type: List[int]
         self.data = []  # type: List[int]
         self.start_datetime = None
@@ -1476,10 +1406,13 @@ class EcgController(QObject):
         self.port.close()
 
     def read_data(self, greedy: bool = True) -> None:
+        if not self.port:
+            return
         data_changed = False
         while self.port.inWaiting() > 0:
+            # noinspection PyArgumentList
+            binary_line = self.port.readline()
             try:
-                binary_line = self.port.readline()
                 line = binary_line.decode(SERIAL_ENCODING).strip()
             except UnicodeDecodeError:
                 log.warning(
@@ -1528,6 +1461,8 @@ class EcgController(QObject):
             self.trigger_update(False)
 
     def send_command(self, cmd: str) -> None:
+        if not self.port:
+            return
         log.debug("EcgController: send_command: {}".format(cmd))
         self.port.write((cmd + CMD_TERMINATOR).encode(SERIAL_ENCODING))
         self.port.flush()
@@ -1587,6 +1522,7 @@ class EcgApplication(QApplication):
         self.update_analytics_every_ms = update_analytics_every_ms
         self.last_ecg_update_at = current_milli_time()
         self.last_analytics_update_at = self.last_ecg_update_at
+        # noinspection PyUnresolvedReferences
         self.timer.timeout.connect(self.ecg.read_data)
         self.ecg.data_changed.connect(self.on_data_changed)
         self.ecg.arduino_awake.connect(self.mw.on_arduino_awake)
@@ -1662,8 +1598,20 @@ def main() -> None:
         log.warning("No serial ports found! (Is the Arduino plugged in?)")
 
     parser = argparse.ArgumentParser(
-        description="Primitive ECG application for Arduino",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description="""
+Primitive ECG application for Arduino.
+By Rudolf Cardinal (rudolf@pobox.com).
+
+(*) Written for the Arduino UNO.
+    The accompanying file "ecg_arduino/src/ecg.cpp" should be built and 
+    uploaded to the Arduino; the script "ecg_arduino/build_upload" does this
+    automatically, and the script "term" allows you to interact with the 
+    Arduino manually. Details of the protocol are in ecg.cpp.
+(*) The Arduino code expects an ECG device producing inputs in the range 
+    0 to +3.3V, on Arduino input pin A1.
+(*) Uses a sampling frequency of {fs} Hz.
+        """.format(fs=SAMPLING_FREQ_HZ),
+        formatter_class=RawDescriptionArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--baud", type=int, default=DEFAULT_BAUD_RATE,
