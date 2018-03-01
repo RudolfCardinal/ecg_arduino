@@ -136,25 +136,27 @@ MAX_INPUT = 1024  # https://www.gammon.com.au/adc
 # Characteristic of our serial comms:
 SERIAL_ENCODING = "ascii"
 
+# Physical constants
+MV_PER_V = 1000
+
 # -----------------------------------------------------------------------------
 # ECG capture
 # -----------------------------------------------------------------------------
 
-# Our fixed preferences:
-SAMPLING_FREQ_HZ = 300.0  # twice the "pro" top frequency of 150 Hz (the Nyquist frequency for 150 Hz signals)  # noqa
+DEFAULT_SAMPLING_FREQ_HZ = 300.0  # twice the "pro" top frequency of 150 Hz (the Nyquist frequency for 150 Hz signals)  # noqa
+DEFAULT_GAIN = 100  # as per AD8232 docs
+MAX_OUTPUT_VOLTAGE_V = 3.3  # fixed in ecg.cpp
 POLLING_TIMER_PERIOD_MS = 5
 MIN_FILTER_FREQ_HZ = 0
-MAX_FILTER_FREQ_HZ = SAMPLING_FREQ_HZ
+MAX_FILTER_FREQ_HZ = DEFAULT_SAMPLING_FREQ_HZ
 MIN_NUMTAPS = 1
 MIN_NOTCH_Q = 1.0  # no idea
 MAX_NOTCH_Q = 1000.0  # no idea
 MIN_ECG_DURATION_S = 10.0
 MAX_ECG_DURATION_S = 300.0
 
-# User preferences:
 DEFAULT_ECG_DURATION_S = 30.0
 DEFAULT_SINE_FREQUENCY_HZ = 1.0
-# Filtering preferences:
 DEFAULT_INVERT = False
 DEFAULT_CENTRE = False
 DEFAULT_USE_HIGHPASS = True
@@ -276,6 +278,7 @@ class AdvancedWindow(QDialog):
     # noinspection PyArgumentList
     def __init__(self,
                  ecg_info: ReturnTuple,
+                 abs_voltage: bool,
                  parent: QWidget = None) -> None:
         """
         ecg_info:
@@ -309,7 +312,8 @@ class AdvancedWindow(QDialog):
         self.plot_filtered = PlotWidget(
             labels={
                 "bottom": "time (s)",
-                "left": "Filtered ECG signal (arbitrary units)"
+                "left": "Filtered ECG signal ({})".format(
+                    "mV" if abs_voltage else "arbitrary units")
             }
         )
         self.plot_filtered.plot(
@@ -401,7 +405,11 @@ class MainWindow(QWidget):
 
         layout = QGridLayout()
         self.plot_ecg = PlotWidget(
-            labels={"bottom": "time (s)"},
+            labels={
+                "bottom": "time (s)",
+                "left": "ECG signal ({})".format(
+                    "mV" if self.ecg.abs_voltage else "arbitrary units")
+            },
             background='w'  # white
         )
         self.curve = self.plot_ecg.plot(pen=ECG_PEN)
@@ -1055,7 +1063,9 @@ class MainWindow(QWidget):
             # noinspection PyCallByClass,PyArgumentList
             QMessageBox.warning(self, "Advanced plots", "Insufficient data")
             return
-        aw = AdvancedWindow(ecg_info=ecg_info, parent=self)
+        aw = AdvancedWindow(ecg_info=ecg_info,
+                            abs_voltage=self.ecg.abs_voltage,
+                            parent=self)
         aw.exec_()  # modal
 
 
@@ -1079,6 +1089,8 @@ class EcgController(QObject):
         'start_datetime': None,
         'latest_datetime': None,
 
+        'ecg_gain': DEFAULT_GAIN,
+
         'invert': DEFAULT_INVERT,
         'centre_on_mean': DEFAULT_CENTRE,
 
@@ -1094,17 +1106,21 @@ class EcgController(QObject):
         'notch_freq_hz': DEFAULT_NOTCH_FREQ_HZ,
         'notch_quality_factor': DEFAULT_NOTCH_Q,
 
-        'sampling_freq_hz': SAMPLING_FREQ_HZ,
+        'sampling_freq_hz': DEFAULT_SAMPLING_FREQ_HZ,
         'buffer_duration_s': DEFAULT_ECG_DURATION_S,
     }
 
     def __init__(self,
                  port_device: str,
                  baud: int,
+                 abs_voltage: bool,
+                 ecg_gain: float,
                  buffer_duration_s: float = DEFAULT_ECG_DURATION_S,
-                 sampling_freq_hz: float = SAMPLING_FREQ_HZ,
+                 sampling_freq_hz: float = DEFAULT_SAMPLING_FREQ_HZ,
                  parent: QObject = None) -> None:
         super().__init__(parent=parent)
+        self.abs_voltage = abs_voltage
+        self.ecg_gain = ecg_gain
 
         self.updates_enabled = True
 
@@ -1351,14 +1367,30 @@ class EcgController(QObject):
                     dtype=DTYPE)
         return self.cached_time_axis
 
-    def get_data(self) -> np.array:
+    def get_data(self, debug: bool = True) -> np.array:
         data = np.array(self.data, dtype=DTYPE)
         if not self.data:  # this truth-test doesn't work for np.array()
             return data  # filters will crash on empty data
+        if self.abs_voltage:
+            # Convert to voltage in mV
+            mv_per_int = (
+                    MV_PER_V * MAX_OUTPUT_VOLTAGE_V /
+                    (self.ecg_gain * MAX_INPUT)
+            )
+            if debug:
+                log.critical("Raw data [{}-{}]: min {}, max {}".format(
+                    MIN_INPUT, MAX_INPUT, np.min(data), np.max(data)))
+                log.critical("mv_per_int: {}".format(mv_per_int))
+            data = data * mv_per_int
+            if debug:
+                log.critical("In mV: min {}, max {}".format(
+                    np.min(data), np.max(data)))
+        # Invert? Centre?
         if self.invert:
             data = MAX_INPUT - data
         if self.centre_on_mean:
             data = data - np.mean(data)
+        # Filters
         if self.use_lowpass_filter and not self.use_highpass_filter:
             try:
                 data = lowpass_filter(
@@ -1403,7 +1435,8 @@ class EcgController(QObject):
         return data
 
     def shutdown(self) -> None:
-        self.port.close()
+        if self.port is not None:
+            self.port.close()
 
     def read_data(self, greedy: bool = True) -> None:
         if not self.port:
@@ -1509,11 +1542,18 @@ class EcgApplication(QApplication):
             argv: List[str],
             port_device: str,
             baud: int,
+            sampling_freq_hz: float,
+            abs_voltage: bool,
+            ecg_gain: float,
             update_ecg_every_ms: int = UPDATE_ECG_EVERY_MS,
             update_analytics_every_ms: int = UPDATE_ANALYTICS_EVERY_MS
     ) -> None:
         super().__init__(argv)
-        self.ecg = EcgController(port_device=port_device, baud=baud,
+        self.ecg = EcgController(port_device=port_device,
+                                 baud=baud,
+                                 sampling_freq_hz=sampling_freq_hz,
+                                 abs_voltage=abs_voltage,
+                                 ecg_gain=ecg_gain,
                                  parent=self)
         self.mw = MainWindow(app=self)
         self.mw.show()
@@ -1601,6 +1641,7 @@ def main() -> None:
         description="""
 Primitive ECG application for Arduino.
 By Rudolf Cardinal (rudolf@pobox.com).
+Written for a UK primary school Science Week 2018.
 
 (*) Written for the Arduino UNO.
     The accompanying file "ecg_arduino/src/ecg.cpp" should be built and 
@@ -1609,8 +1650,53 @@ By Rudolf Cardinal (rudolf@pobox.com).
     Arduino manually. Details of the protocol are in ecg.cpp.
 (*) The Arduino code expects an ECG device producing inputs in the range 
     0 to +3.3V, on Arduino input pin A1.
-(*) Uses a sampling frequency of {fs} Hz.
-        """.format(fs=SAMPLING_FREQ_HZ),
+
+Note also:
+
+- The DFRobot ECG device [1] is a three-electrode system using the AD8232 
+  chip [2]. The normal way of using three electrodes here is to use the leg
+  electrode for "common-mode rejection" [2, 3]. As Wikipedia notes [4], a
+  differential amplifier is meant to take two inputs V_pos and V_neg and 
+  produce an output voltage V_out that's a multiple of the difference: 
+        V_out = gain_diff(V_pos - V_neg)
+  where "gain_diff" is the differential again. However, the real output is
+        V_out = gain_diff(V_pos - V_neg) + 0.5 gain_cm(V_pos + V_neg)  
+  where "gain_cm" is the common-mode gain (usually much smaller than 
+  gain_diff). One might imagine that the technique of common-mode rejection 
+  would be to measure the common-mode signal (V_pos + V_neg) and remove it.
+  Instead, it seems that the AD8232 measures the common-mode signal, via the
+  right leg electrode, inverts it, and injects it back into the subject ("right 
+  leg drive amplifier") [2, 3]. (Re safety: the whole thing is driven by a 5 V 
+  supply, so this shouldn't be dangerous, and the AD8232 device advises 
+  additional safety measures [2] that one would hope the DFRobot device 
+  follows.)
+   
+- So I think that when the DFRobot device is properly connected, its signal
+  is (left arm - right arm) = ECG lead I, and the "foot" electrode is used for 
+  the common-mode signal injection.
+
+- To calculate absolute voltage: we can't use an Arduino reference signal.
+  Arduinos can't generate a proper analogue output, or even a pulse-width-
+  modulated (PWM) signal in the right voltage range, since the Arduino PWM 
+  signal is 0 and +5V. So to know an absolute input voltage, we need to know 
+  the DFRobot device's gain. It appears that the AD8232 gain is exactly 100 
+  [2]. Since the DFRobot's output range is 0 to +3.3V [1], then the input range 
+  is 0 to +30 mV.
+  HOWEVER, in practice I think it is not this. A real ECG produced ranges of:
+        Arduino integer 266-636
+        => Arduino input voltage 0.857 to 2.05 V, range ~1.2 V
+        so if gain is 100, that means the input signal had a range of 0.012 V
+        = 12 mV, and that is crazily big for an ECG; should be more like 1 mV,
+        or maybe 3 mV, as per 
+        https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1769212/ .
+  Therefore, abs_voltage is false by default and you must be sure of your gain
+  to use it.
+  
+[1] https://www.dfrobot.com/wiki/index.php/Heart_Rate_Monitor_Sensor_SKU:_SEN0213
+[2] http://www.analog.com/media/en/technical-documentation/data-sheets/AD8232.pdf
+[3] http://www.ti.com/lit/an/sbaa188/sbaa188.pdf
+[4] https://en.wikipedia.org/wiki/Common-mode_rejection_ratios
+        """,  # noqa
         formatter_class=RawDescriptionArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -1622,11 +1708,30 @@ By Rudolf Cardinal (rudolf@pobox.com).
         default=available_ports[0] if available_ports else "",
         help="Serial port device name"
     )
+    parser.add_argument(
+        "--sampling_freq_hz", type=float, default=DEFAULT_SAMPLING_FREQ_HZ,
+        help="Sampling frequency (Hz); default is 300, the Nyquist frequency "
+             "for signals of interest of up to 150 Hz"
+    )
+    parser.add_argument(
+        "--abs_voltage", action="store_true",
+        help="Show absolute voltage, not arbitrary Arduino range. If you use "
+             "this, you must be sure that your gain is set correctly."
+    )
+    parser.add_argument(
+        "--gain", type=float, default=DEFAULT_GAIN,
+        help="If abs_voltage is True: "
+             "Gain (voltage multiple) from the ECG sensor (e.g. 0 to about 3 "
+             "mV) to the Arduino (0 to +{}V)".format(MAX_OUTPUT_VOLTAGE_V)
+    )
     args = parser.parse_args()
 
     ecg_app = EcgApplication(argv=sys.argv,
                              port_device=args.port,
-                             baud=args.baud)
+                             baud=args.baud,
+                             sampling_freq_hz=args.sampling_freq_hz,
+                             abs_voltage=args.abs_voltage,
+                             ecg_gain=args.gain)
     sys.exit(ecg_app.exec_())
 
 
