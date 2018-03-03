@@ -45,13 +45,5 @@ PYTHON / CYTHON
 
 PYTHON LIBRARIES USED
 
-    biosppy==0.5.1              # ECG processing
-    cardinal_pythonlib==1.0.11
-    matplotlib==2.1.2           # required by biosppy but not installed by it
-    pyqtgraph==0.10.0
-    PyQt5==5.10
-    pyserial==3.4
-    reportlab==3.4.0
-    scipy==1.0.0
-    svglib==0.8.1
+    see requirements.txt
 

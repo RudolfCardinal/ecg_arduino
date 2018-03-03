@@ -1,0 +1,23 @@
+INSTALLATION FOR UBUNTU LINUX
+=============================
+
+So, you've chosen the easier OS...
+
+SOFTWARE PREREQUISITES
+----------------------
+
+    sudo apt install arduino
+
+INSTALLING THE ECG PROGRAM
+--------------------------
+
+    cd ~
+    git clone https://github.com/RudolfCardinal/ecg_arduino
+
+    python3 --version  # check this is 3.5 or higher
+    pip3 install virtualenv  # installs virtualenv into the system-wide Python environment.
+    python -m virtualenv ~/venv_ecg
+
+    . ~/venv_ecg/bin/activate
+    pip install -r ~/ecg_arduino/requirements.txt
+
