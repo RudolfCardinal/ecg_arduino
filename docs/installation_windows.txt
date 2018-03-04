@@ -137,3 +137,18 @@ CHECKING COMMUNICATIONS WITH THE ARDUINO
 
 COMPILING AND UPLOADING THE ECG PROGRAM TO THE ARDUINO
 -------------------------------------------------------------------------------
+
+- In the command prompt:
+
+    cd /d %USERPROFILE%
+    cd ecg_arduino\ecg_arduino
+    build_upload.bat
+
+
+RUNNING THE FRONT END
+-------------------------------------------------------------------------------
+
+- In the command prompt, with the virtual environment activated as before:
+
+    cd /d %USERPROFILE%
+    ecg_arduino\ecg_python\ecg.py
