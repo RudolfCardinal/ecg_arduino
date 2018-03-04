@@ -69,8 +69,32 @@ REM ---------------------------------------------------------------------------
 REM The old uisp command doesn't seem to do it for me - based on cursory investigation,
 REM it seems the arduino environment now uses avrdude as well
 rem set cmd=uisp -v=3 -dpart=!arduino_mcu! -dprog=!arduino_programmer! -dserial=/dev/!arduino_comport! -dspeed=!arduino_burnrate! --upload if=!hexfile!
-REM RNC 2018-03-03: added "-v -v" for verbose output
-set cmd=avrdude -v -v -C "!arduino_path!\hardware\tools\avr\etc\avrdude.conf" -p !arduino_mcu! -P !arduino_comport! -c !arduino_programmer! -b !arduino_burnrate! -U "flash:w:!hexfile!"
+
+REM Rudolf Cardinal 2018-03-03: altered here to:
+REM - allow more verbose avrdude output, for debugging
+REM - allow the -D flag: unsure if necessary; used by the "ino" tool but seems
+REM   not necessary
+REM - add the ":i" format flag to the -U option; this means "Intel hex"; see
+REM   https://www.nongnu.org/avrdude/user-manual/avrdude_4.html#Option-Descriptions
+REM   ... but this may have been the default anyway!
+REM - The most important thing is to specify ARDUINO_BURNRATE correctly (for
+REM   USB, use 0 for the default, or 115200, which is the default).
+set cmd=avrdude -C "!arduino_path!\hardware\tools\avr\etc\avrdude.conf" -P !arduino_comport! -b !arduino_burnrate! -c !arduino_programmer! -p !arduino_mcu! -U "flash:w:!hexfile!:i"
+
+REM - remember: NO SPACES around "=" in SET commands (that creates a different
+REM   environment variable that has a space at the end of its name...)
+set _rnc_avrdude_verbose=0
+set _rnc_disable_autoerase=0
+
+REM - remember: (), not {}
+if !_rnc_avrdude_verbose! == 1 (
+    set cmd=!cmd! -v -v -v -v
+)
+if !_rnc_disable_autoerase! == 1 (
+    set cmd=!cmd! -D
+)
+REM end of RNC changes
+
 !abuild_report! !cmd!
 !cmd!
 set rc=!errorlevel!

@@ -1,0 +1,110 @@
+
+avrdude:
+
+    Usage: avrdude [options]
+    Options:
+      -p <partno>                Required. Specify AVR device.
+      -b <baudrate>              Override RS-232 baud rate.
+      -B <bitclock>              Specify JTAG/STK500v2 bit clock period (us).
+      -C <config-file>           Specify location of configuration file.
+      -c <programmer>            Specify programmer type.
+      -D                         Disable auto erase for flash memory
+      -i <delay>                 ISP Clock Delay [in microseconds]
+      -P <port>                  Specify connection port.
+      -F                         Override invalid signature check.
+      -e                         Perform a chip erase.
+      -O                         Perform RC oscillator calibration (see AVR053).
+      -U <memtype>:r|w|v:<filename>[:format]
+                                 Memory operation specification.
+                                 Multiple -U options are allowed, each request
+                                 is performed in the order specified.
+      -n                         Do not write anything to the device.
+      -V                         Do not verify.
+      -u                         Disable safemode, default when running from a script.
+      -s                         Silent safemode operation, will not ask you if
+                                 fuses should be changed back.
+      -t                         Enter terminal mode.
+      -E <exitspec>[,<exitspec>] List programmer exit specifications.
+      -x <extended_param>        Pass <extended_param> to programmer.
+      -y                         Count # erase cycles in EEPROM.
+      -Y <number>                Initialize erase cycle # in EEPROM.
+      -v                         Verbose output. -v -v for more.
+      -q                         Quell progress output. -q -q for less.
+      -l logfile                 Use logfile rather than stderr for diagnostics.
+      -?                         Display this usage.
+
+    avrdude version 6.3, URL: <http://savannah.nongnu.org/projects/avrdude/>
+
+from Arduino/hardware/arduino/avr/boards.txt
+
+    uno.name=Arduino/Genuino Uno
+
+    uno.vid.0=0x2341
+    uno.pid.0=0x0043
+    uno.vid.1=0x2341
+    uno.pid.1=0x0001
+    uno.vid.2=0x2A03
+    uno.pid.2=0x0043
+    uno.vid.3=0x2341
+    uno.pid.3=0x0243
+
+    uno.upload.tool=avrdude
+    uno.upload.protocol=arduino
+    uno.upload.maximum_size=32256
+    uno.upload.maximum_data_size=2048
+    uno.upload.speed=115200
+
+    uno.bootloader.tool=avrdude
+    uno.bootloader.low_fuses=0xFF
+    uno.bootloader.high_fuses=0xDE
+    uno.bootloader.extended_fuses=0xFD
+    uno.bootloader.unlock_bits=0x3F
+    uno.bootloader.lock_bits=0x0F
+    uno.bootloader.file=optiboot/optiboot_atmega328.hex
+
+    uno.build.mcu=atmega328p
+    uno.build.f_cpu=16000000L
+    uno.build.board=AVR_UNO
+    uno.build.core=arduino
+    uno.build.variant=standard
+
+IN THE LONGER RUN
+    ... could convert "ino" package to Python 3 and Windows.
+
+
+SERIAL PORT SPEED PROBLEMS
+
+- Windows COM port for USB is preset to 9600.
+- Arduino tools like avrdude use 115200.
+- TeraTerm has options including doublings up to 921600, but you can't specify
+  an arbitrary speed.
+- The baud rate is hard-coded into ecg.cpp
+- So we need to change it. What's the best?
+- For 300 Hz sampling, with things like "1024" or maybe in the future with
+  a prefix like "A: 1024", then with a newline we're looking at about 8
+  characters per sample. With 8N1, there are 10 bits per character (1 start
+  bit, 8 data bits, 1 stop bit), so the character rate is the baud rate divided
+  by 10. For 300 Hz, we need a baud rate of at least
+    300 samples/sec * 8 characters/sample * 10 bits/character = 24,000 bits/sec
+
+- See also:
+  https://www.quora.com/What-is-the-baud-rate-and-why-does-Arduino-have-a-baud-rate-of-9-600
+  https://arduino.stackexchange.com/questions/296/how-high-of-a-baud-rate-can-i-go-without-errors
+
+- So, pragmatics: if we use the default of 115200, everyone is happy in terms
+  of simple software interfaces, and our maximum sampling rate will be about
+  115200 / (8 * 10) = 1,440 Hz -- that's fine for an ECG!
+
+- Ah! No, hang on, the output currently looks like:
+        33252184,579
+        33255520,578
+  So with a longer output like
+        xxxxxxxxx,yyyy
+  plus newline, that's ~15 character/sample. For 1 kHz with that, we need
+  a baud rate of 150,000 bps. Conversely, at 115,200, we max at 768 Hz.
+  Let's go with the highest supported by TeraTerm, as a somewhat random
+  example, and pick 921600 (for a maximum of ~6 kHz).
+
+- Ah, again! TeraTerm does allow you to enter arbitrary speeds. Anyway, the
+  baud rates based on doublings are probably more sensible from a clock
+  perspective.

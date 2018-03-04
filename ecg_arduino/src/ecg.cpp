@@ -91,8 +91,13 @@ A good library instead:
 // #include "FlexiTimer2.h"  // https://github.com/wimleers/flexitimer2
 #include "TimerOne.h"
 
-#define BAUD_RATE 1000000  // 1 Mbit/s
+#define BAUD_RATE 921600  // see ecg.py, arduino_windows_notes.txt
 #define SERIAL_DATA_PARITY_STOP SERIAL_8N1
+// Note that 8N1 is 10 bits per character (1 start, 8 data, 1 stop).
+// So the character rate is 11,520 chars/sec.
+// The maximum sampling rate will be affected by this.
+// We don't use 1 Mbps or higher because Windows terminal programs struggle;
+// this is simpler. See arduino_windows_notes.txt
 
 #define INPUT_BUFSIZE 20  // DO NOT USE 100.
 /*

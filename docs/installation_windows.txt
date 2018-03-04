@@ -1,8 +1,8 @@
 INSTALLATION FOR WINDOWS
-========================
+===============================================================================
 
 SOFTWARE PREREQUISITES
-----------------------
+-------------------------------------------------------------------------------
 
 - Git
 
@@ -18,9 +18,11 @@ SOFTWARE PREREQUISITES
 
     Download and install the Arduino IDE from https://www.arduino.cc/en/Main/Software
     The default installation settings are fine.
+
+- Windows environment variables
     
     Tell the build system about the Arduino path, as follows.
-    
+
     Windows Start button
         -> search for "environment variables"
         -> run "Edit the system environment variables"
@@ -32,27 +34,38 @@ SOFTWARE PREREQUISITES
 
         ARDUINO_PATH        C:\Program Files (x86)\Arduino
         ARDUINO_MCU	        the name of your microcontroller (e.g., atmega168)
-                ... atmega328 for Arduino Uno; see
+                ... atmega328p for Arduino Uno; see
                     https://store.arduino.cc/arduino-uno-rev3
                     http://forum.arduino.cc/index.php?topic=145065.0
-        ARDUINO_PROGRAMMER	the name of the programmer you wish to use (usually stk500)
+                    Arduino/hardware/arduino/avr/boards.txt  # especially this
+        ARDUINO_PROGRAMMER  the name of the programmer you wish to use (usually stk500)
                 ... we do NOT want to use one; they are external devices
                     ... https://www.arduino.cc/en/Hacking/Programmer
                 ... so use "arduino"
                     ... based on "-carduino" in https://github.com/Robot-Will/Stino/issues/346
                     ... and C:\Program Files (x86)\Arduino\hardware\tools\avr\etc\avrdude.conf
+                    ... and Arduino/hardware/arduino/avr/boards.txt  # especially this
         ARDUINO_FCPU	    the clock frequency of your microcontroller (usually 16000000 for atmega168)
                 ... also for the atmega328p (16 MHz):
                     http://forum.arduino.cc/index.php?topic=27599.0
         ARDUINO_COMPORT	    the port to which your programmer is connected (e.g. COM1,  COM2, etc.)
                 ... see Device Manager / Ports (COM & LPT)
                 ... COM5 is typical for USB
-        ARDUINO_BURNRATE	the baud rate at which the download is to occur (19200 seems to be a good starting point)
-                ... 1000000 is fine for USB?
-                ... the COM port is set to 9600
+        ARDUINO_BURNRATE    the baud rate at which the download is to occur
+                ... for USB, the COM port is set to 9600, but use 115200 as per
+                    Arduino/hardware/arduino/avr/boards.txt, or use 0 to leave
+                    at the avrdude Arduino default, which is 115200 (see
+                    main.c and arduino.c in the avrdude source).
+
+    Optionally, add this to the PATH (for avrdude):
+        C:\Program Files (x86)\Arduino\hardware\tools\avr\bin
 
 OPTIONAL
---------
+-------------------------------------------------------------------------------
+
+- You will probably want a terminal emulator, e.g.
+
+    TeraTerm: https://osdn.net/projects/ttssh2/
 
 - You may want to install a text editor, such as:
 
@@ -65,8 +78,9 @@ OPTIONAL
   "find file by content quickly, anyone?"), you may want to install Cygwin from
   https://www.cygwin.com/ .
 
+
 INSTALLING THE ECG PROGRAM
---------------------------
+-------------------------------------------------------------------------------
 
 - Fetch the ECG code. Run a command prompt, and enter these commands:
 
@@ -93,59 +107,33 @@ INSTALLING THE ECG PROGRAM
     pip install -r ecg_arduino\requirements.txt
 
 
-PROBLEMS
---------
+CHECKING COMMUNICATIONS WITH THE ARDUINO
+-------------------------------------------------------------------------------
 
-Can't upload from batch file:
+- Assuming you have put avrdude on the PATH (as above), use a command like
+  this:
+
+    avrdude -c arduino -p atmega328p -P COM5 -C "C:\Program Files (x86)\Arduino\hardware\tools\avr\etc\avrdude.conf"
+            ^^         ^^            ^^      ^^
+            protocol   device        port    configuration file
+
+  If it's working, you should see this:
+
+    avrdude: AVR device initialized and ready to accept instructions
+    Reading | ################################################## | 100% 0.00s
+    avrdude: Device signature = 0x1e950f (probably m328p)
+    avrdude: safemode: Fuses OK (E:00, H:00, L:00)
+    avrdude done.  Thank you.
+
+  Since USB manages its own serial rate, you should not specify the "-b" rate
+  (e.g. "-b 9600"). Possibly there is a value that works, but generally you
+  see this sort of error:
+
     avrdude: stk500_recv(): programmer is not responding
-    avrdude: stk500_getsync() attempt 1 of 10: not in sync: resp=0x45
+    avrdude: stk500_getsync() attempt 1 of 10: not in sync: resp=0x00
 
-even when the calling command is:
-abuild.bat: avrdude -C "C:\Program Files (x86)\Arduino\hardware\tools\avr\etc\avrdude.conf" -p atmega328 -P COM5 -c arduino -b 9600 -U "flash:w:.\obj\ecg_all.hex"
+  To see all options, use "avrdude -?".
 
-avrdude -v -C "C:\Program Files (x86)\Arduino\hardware\tools\avr\etc\avrdude.conf" -p atmega328 -P COM5 -c arduino -b 9600 -U "flash:w:.\obj\ecg_all.hex"
 
-See also
-    https://forum.arduino.cc/index.php?topic=28686.0
-    https://learn.sparkfun.com/tutorials/installing-an-arduino-bootloader#uploading-code---hard-way
-
-*** check the avrdude command emitted by ino (inotool), from upload.py line 129
-    ... compare to aupload.bat, line 73
-*** and document how you get "ino" available under Ubuntu
-*** then delete Arduino from git_repos
-
-avrdude:
-
-    Usage: avrdude [options]
-    Options:
-      -p <partno>                Required. Specify AVR device.
-      -b <baudrate>              Override RS-232 baud rate.
-      -B <bitclock>              Specify JTAG/STK500v2 bit clock period (us).
-      -C <config-file>           Specify location of configuration file.
-      -c <programmer>            Specify programmer type.
-      -D                         Disable auto erase for flash memory
-      -i <delay>                 ISP Clock Delay [in microseconds]
-      -P <port>                  Specify connection port.
-      -F                         Override invalid signature check.
-      -e                         Perform a chip erase.
-      -O                         Perform RC oscillator calibration (see AVR053).
-      -U <memtype>:r|w|v:<filename>[:format]
-                                 Memory operation specification.
-                                 Multiple -U options are allowed, each request
-                                 is performed in the order specified.
-      -n                         Do not write anything to the device.
-      -V                         Do not verify.
-      -u                         Disable safemode, default when running from a script.
-      -s                         Silent safemode operation, will not ask you if
-                                 fuses should be changed back.
-      -t                         Enter terminal mode.
-      -E <exitspec>[,<exitspec>] List programmer exit specifications.
-      -x <extended_param>        Pass <extended_param> to programmer.
-      -y                         Count # erase cycles in EEPROM.
-      -Y <number>                Initialize erase cycle # in EEPROM.
-      -v                         Verbose output. -v -v for more.
-      -q                         Quell progress output. -q -q for less.
-      -l logfile                 Use logfile rather than stderr for diagnostics.
-      -?                         Display this usage.
-
-    avrdude version 6.3, URL: <http://savannah.nongnu.org/projects/avrdude/>
+COMPILING AND UPLOADING THE ECG PROGRAM TO THE ARDUINO
+-------------------------------------------------------------------------------

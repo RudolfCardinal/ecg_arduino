@@ -132,7 +132,7 @@ REM ---------------------------------------------------------------------------
 REM     Find all external libraries, and compile a list of include paths...
 
 if !abuild_nolibs! == false (
-	REM RNC 2018-03-03: removed:
+	REM Rudolf Cardinal 2018-03-03: removed:
 	REM set abuild_include_paths=
 	REM set abuild_include_paths_root=!arduino_path!\hardware\libraries
     REM ... and added:
@@ -169,7 +169,7 @@ for %%f in (!abuild_cppname!) do (
     set abuild_cmd=avr-g++ !abuild_gpp_opts! %%f -o!abuild_user_objfile!
     !abuild_report! !abuild_cmd!
     if exist !abuild_user_objfile! (del !abuild_user_objfile!)
-    REM RNC 2018-03-03: changed:
+    REM Rudolf Cardinal 2018-03-03: changed:
     REM !abuild_cmd!
     REM ... to
     !abuild_cmd! || exit /b

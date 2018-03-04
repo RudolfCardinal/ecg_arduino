@@ -34,12 +34,12 @@ if not defined arduino_path (
 REM ---------------------------------------------------------------------------
 REM     Verify that ARDUINO_PATH points to a valid Arduino-0011 installation...
 
-REM RNC 2018-03-03: removed:
+REM Rudolf Cardinal 2018-03-03: removed:
 REM set arduino_runtime=!arduino_path!\hardware\cores\arduino
 REM ... and added:
 set arduino_runtime=!arduino_path!\hardware\arduino\avr\cores\arduino
 
-REM RNC 2018-03-03: replaced "!arduino_path!\cygwin1.dll" with "!arduino_path!\arduino.exe"
+REM Rudolf Cardinal 2018-03-03: replaced "!arduino_path!\cygwin1.dll" with "!arduino_path!\arduino.exe"
 for %%f in (
     "!arduino_path!\arduino.exe"
 ) do (

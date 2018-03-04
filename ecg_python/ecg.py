@@ -127,7 +127,7 @@ PREFIX_DEBUG = "Debug: "
 PREFIX_INFO = "Info: "
 PREFIX_WARNING = "Warning: "
 PREFIX_ERROR = "Error: "
-DEFAULT_BAUD_RATE = 1000000
+DEFAULT_BAUD_RATE = 921600  # see ecg.cpp, arduino_windows_notes.txt
 MIN_INPUT = 0
 MAX_INPUT = 1024  # https://www.gammon.com.au/adc
 

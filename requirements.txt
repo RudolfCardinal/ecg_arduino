@@ -1,5 +1,6 @@
 biosppy==0.5.1              # ECG processing
 cardinal_pythonlib==1.0.11
+# NOT THIS: WANTS PYTHON 2: ino==0.3.6                  # For command-line Arduino building (Linux)
 matplotlib==2.1.2           # required by biosppy but not installed by it
 pyqtgraph==0.10.0
 PyQt5==5.10
