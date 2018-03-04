@@ -791,6 +791,14 @@ class MainWindow(QWidget):
             # We keep this tempdir going, because ReportLab sometimes (e.g.
             # with flowables.Image) doesn't read the file when the Image is
             # created, but at PDF write time.
+            #
+            # Note also that under Windows (but not so far under Linux!),
+            # the image file remains open at the point the "with" statement
+            # ends, and you get a crash with:
+            #   PermissionError: [WinError 32] The process cannot access the
+            #   file because it is being used by another process:
+            #   'C:\\Users\\...\\AppData\\Local\\Temp\\tmpfcjs1fiv\\tmp.png'
+            # See https://stackoverflow.com/questions/10996558/determining-if-an-image-is-closed-after-including-in-a-reportlab  # noqa
 
             # Get the ECG as a reportlab Drawing
             plotitem = self.plot_ecg.getPlotItem()
@@ -858,6 +866,8 @@ class MainWindow(QWidget):
                 ecg,
             ]  # type: List[Flowable]
             doc.build(story)
+            del story  # } [story contains ecg]
+            del ecg    # } make sure that file is closed...
 
     @staticmethod
     def _save_svg(plotitem: PlotItem, filename: str) -> None:

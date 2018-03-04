@@ -7,7 +7,9 @@ REM     Arduino command-line build for Windows.
 REM ---------------------------------------------------------------------------
 
 REM     Initialize stuff here...
-set abuild_release_date=September 10, 2008
+REM Rudolf Cardinal 2018-03-03: changed date
+REM set abuild_release_date=September 10, 2008
+set abuild_release_date=March 03, 2018
 set abuild_error=echo.abuild.bat: *** ERROR:
 set abuild_report=rem
 set abuild_retcode=1
