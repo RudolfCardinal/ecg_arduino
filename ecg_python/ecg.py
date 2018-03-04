@@ -664,6 +664,7 @@ class MainWindow(QWidget):
 
         hr_array = ecg_info["heart_rate"]  # type: np.ndarray
         if hr_array.size > 0:
+            # noinspection PyTypeChecker
             mean_hr = float(np.mean(hr_array))
             self.hr_lbl.setText(str(normal_round_float(mean_hr, self.hr_dp)))
         else:
