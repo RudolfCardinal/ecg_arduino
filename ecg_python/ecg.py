@@ -141,7 +141,7 @@ MV_PER_V = 1000
 # ECG capture
 # -----------------------------------------------------------------------------
 
-DEFAULT_SAMPLING_FREQ_HZ = 300.0  # twice the "pro" top frequency of 150 Hz (the Nyquist frequency for 150 Hz signals)  # noqa
+DEFAULT_SAMPLING_FREQ_HZ = 1000.0  # see command-line help text
 DEFAULT_GAIN = 100  # as per AD8232 docs
 MAX_OUTPUT_VOLTAGE_V = 3.3  # fixed in ecg.cpp
 POLLING_TIMER_PERIOD_MS = 5
@@ -1648,25 +1648,25 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         description="""
-Primitive ECG application for Arduino.
-By Rudolf Cardinal (rudolf@pobox.com).
-Written for a UK primary school Science Week 2018.
+Primitive ECG application for Arduino. By Rudolf Cardinal (rudolf@pobox.com).
+Written for a UK primary school Science Week in March 2018.
 
-(*) Written for the Arduino UNO.
-    The accompanying file "ecg_arduino/src/ecg.cpp" should be built and 
-    uploaded to the Arduino; the script "ecg_arduino/build_upload" does this
-    automatically, and the script "term" allows you to interact with the 
-    Arduino manually. Details of the protocol are in ecg.cpp.
+(*) Written for the Arduino UNO. See the "ecg_arduino" directory.
+    The accompanying file "src/ecg.cpp" should be built and uploaded to the 
+    Arduino; the script "build_upload.sh" (Linux) or "build_upload.bat" 
+    (Windows) does this automatically. The Linux script "term.sh" or a terminal 
+    program (e.g. TeraTerm for Windows) allows you to interact with the Arduino 
+    manually. Details of the protocol are in ecg.cpp.
 (*) The Arduino code expects an ECG device producing inputs in the range 
     0 to +3.3V, on Arduino input pin A1.
 
 Note also:
 
-- The DFRobot ECG device [1] is a three-electrode system using the AD8232 
-  chip [2]. The normal way of using three electrodes here is to use the leg
-  electrode for "common-mode rejection" [2, 3]. As Wikipedia notes [4], a
-  differential amplifier is meant to take two inputs V_pos and V_neg and 
-  produce an output voltage V_out that's a multiple of the difference: 
+- The DFRobot ECG device [1] is a 3-electrode system using the AD8232 chip [2]. 
+  The normal way of using three electrodes here is to use the leg electrode for 
+  "common-mode rejection" [2, 3]. A differential amplifier is meant to take two 
+  inputs V_pos and V_neg and produce an output voltage V_out that's a multiple 
+  of the difference [4]: 
         V_out = gain_diff(V_pos - V_neg)
   where "gain_diff" is the differential again. However, the real output is
         V_out = gain_diff(V_pos - V_neg) + 0.5 gain_cm(V_pos + V_neg)  
@@ -1676,36 +1676,44 @@ Note also:
   Instead, it seems that the AD8232 measures the common-mode signal, via the
   right leg electrode, inverts it, and injects it back into the subject ("right 
   leg drive amplifier") [2, 3]. (Re safety: the whole thing is driven by a 5 V 
-  supply, so this shouldn't be dangerous, and the AD8232 device advises 
-  additional safety measures [2] that one would hope the DFRobot device 
-  follows.)
+  supply, so this shouldn't be dangerous, and the AD8232 advises additional 
+  safety measures [2] that one would hope the DFRobot device follows.)
    
 - So I think that when the DFRobot device is properly connected, its signal
-  is (left arm - right arm) = ECG lead I, and the "foot" electrode is used for 
-  the common-mode signal injection.
+  is (left arm LA - right arm RA) = ECG lead I, and the "foot" (right leg, RL)
+  electrode is used for the common-mode signal injection.
 
 - To calculate absolute voltage: we can't use an Arduino reference signal.
   Arduinos can't generate a proper analogue output, or even a pulse-width-
   modulated (PWM) signal in the right voltage range, since the Arduino PWM 
-  signal is 0 and +5V. So to know an absolute input voltage, we need to know 
-  the DFRobot device's gain. It appears that the AD8232 gain is exactly 100 
-  [2]. Since the DFRobot's output range is 0 to +3.3V [1], then the input range 
-  is 0 to +30 mV.
+  signal alternates between 0 +5V. So to know an absolute input voltage, we 
+  need to know the DFRobot device's gain. It appears that the AD8232 gain is 
+  exactly 100 [2]. Since the DFRobot's output range is 0 to +3.3V [1], then the 
+  input range is 0 to +30 mV.
   HOWEVER, in practice I think it is not this. A real ECG produced ranges of:
         Arduino integer 266-636
         => Arduino input voltage 0.857 to 2.05 V, range ~1.2 V
-        so if gain is 100, that means the input signal had a range of 0.012 V
-        = 12 mV, and that is crazily big for an ECG; should be more like 1 mV,
-        or maybe 3 mV, as per 
-        https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1769212/ .
-  Therefore, abs_voltage is false by default and you must be sure of your gain
-  to use it.
+        => if gain is 100, that means the input signal had a range of 0.012 V
+           = 12 mV, and that is crazily big for an ECG; should be more like 
+           1 mV, or maybe 3 mV, as per [5].
+  Therefore, abs_voltage is set to false by default and you must be sure of 
+  your gain to use it.
+  
+- Sampling rate: should be at least 1000 Hz for paediatric ECGs; see [5].
+  
+- EEG considerations: while the normal ECG is up to about 3 mV [5], the EEG
+  alpha rhythm from scalp electrodes is of the order of 5 to 100 µV [6], so
+  we're talking about a signal 1000 to 30 times smaller. The ECG signal from
+  the Arduino spans a range of about 350 integer units, so we'd be talking 
+  about an ECG signal spanning 0.3 to 12. Even the latter is probably poor, so
+  let's ignore this for Science Week.
   
 [1] https://www.dfrobot.com/wiki/index.php/Heart_Rate_Monitor_Sensor_SKU:_SEN0213
 [2] http://www.analog.com/media/en/technical-documentation/data-sheets/AD8232.pdf
 [3] http://www.ti.com/lit/an/sbaa188/sbaa188.pdf
 [4] https://en.wikipedia.org/wiki/Common-mode_rejection_ratios
-        """,  # noqa
+[5] https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1769212/
+[6] https://www.ncbi.nlm.nih.gov/pubmed/15036063 """,  # noqa
         formatter_class=RawDescriptionArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -1719,8 +1727,13 @@ Note also:
     )
     parser.add_argument(
         "--sampling_freq_hz", type=float, default=DEFAULT_SAMPLING_FREQ_HZ,
-        help="Sampling frequency (Hz); default is 300, the Nyquist frequency "
-             "for signals of interest of up to 150 Hz"
+        help=(
+            "Sampling frequency (Hz); default is {f}, the Nyquist frequency "
+            "for signals of interest of up to {half_f} Hz".format(
+                f=DEFAULT_SAMPLING_FREQ_HZ,
+                half_f=DEFAULT_SAMPLING_FREQ_HZ / 2
+            )
+        )
     )
     parser.add_argument(
         "--abs_voltage", action="store_true",
