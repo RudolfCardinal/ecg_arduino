@@ -6,7 +6,11 @@ So, you've chosen the easier OS...
 SOFTWARE PREREQUISITES
 ----------------------
 
-    sudo apt install arduino
+    sudo apt install arduino  # for ino; you don't need the Arduino IDE but you do need this
+    sudo apt install cfget  # used by the command-line scripts
+    sudo apt install socat  # for a terminal emulator
+
+    sudo pip2 install ino  # uses system Python 2 to install ino
 
 INSTALLING THE ECG PROGRAM
 --------------------------
@@ -21,3 +25,18 @@ INSTALLING THE ECG PROGRAM
     . ~/venv_ecg/bin/activate
     pip install -r ~/ecg_arduino/requirements.txt
 
+
+COMPILING AND UPLOADING THE ECG PROGRAM TO THE ARDUINO
+-------------------------------------------------------------------------------
+
+- In the command prompt:
+
+    ~/ecg_arduino/ecg_arduino/build_upload.sh
+
+
+RUNNING THE FRONT END
+-------------------------------------------------------------------------------
+
+- In the command prompt, with the virtual environment activated as before:
+
+    ~/ecg_arduino/ecg_python/ecg.py

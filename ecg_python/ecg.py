@@ -35,7 +35,7 @@ from pdb import set_trace
 import sys
 from tempfile import TemporaryDirectory
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from biosppy.signals.ecg import ecg as biosppy_ecg
 from biosppy.utils import ReturnTuple
@@ -182,10 +182,8 @@ DEFAULT_NOTCH_Q = 25.0  # Q = w0/bw, so for 50Hz +/- 1 Hz (BW 2Hz), Q = 50/2
 USE_PDF_EXPORT = True
 USE_SVG_EXPORT = False
 DTYPE = "float64"
-JSON_FILE_FILTER = "JSON Files (*.json);;All files (*)"
-BITMAP_FILE_FILTER = "PNG files (*.png);;All files (*)"
-SVG_FILE_FILTER = "SVG files (*.svg);;All files (*)"
-PDF_FILE_FILTER = "PDF files (*.pdf);;All files (*)"
+JSON_FILE_SAVE_FILTER = "JSON Files (*.json)"
+JSON_FILE_LOAD_FILTER = "JSON Files (*.json);;All files (*)"
 UPDATE_ECG_EVERY_MS = 20  # 50 Hz
 UPDATE_ANALYTICS_EVERY_MS = 500  # 0.5 Hz
 MICROSECONDS_PER_S = 1000000
@@ -236,6 +234,74 @@ def debug_trace():
     pyqtRemoveInputHook()
     set_trace()
     # When you've finished stepping: pyqtRestoreInputHook()
+
+
+def get_save_filename(
+        filetype_filter: str,
+        default_ext: str,
+        parent: QWidget = None,
+        caption: str = "",
+        directory: str = "",
+        initial_filter: str = "",
+        options: Union[QFileDialog.Options, QFileDialog.Option] = None) -> str:
+    """
+    Saving files / default extension via QFileDialog.getSaveFileName():
+
+    We could add default extensions manually, but then we don't benefit from
+    Qt's auto-checking to see if we mean that we want to overwrite something
+    (or, it's a lot of work to check without double-checking).
+    Qt is meant to provide us with a filename using the default extension if
+    we preselect the filter using selectedFilter (or in PyQt, initialFilter);
+    see
+        https://stackoverflow.com/questions/7234381/
+    ... but it doesn't.
+    Known Qt 5 bug; see
+        https://bugreports.qt.io/browse/QTBUG-27186
+    Also:
+        https://stackoverflow.com/questions/9822177/
+
+    So let's deal with this properly:
+    """
+    if options is None:
+        options = QFileDialog.Options()
+    while True:
+        # noinspection PyArgumentList
+        filename, _ = QFileDialog.getSaveFileName(
+            parent=parent,
+            caption=caption,
+            directory=directory,
+            filter=filetype_filter,
+            initialFilter=initial_filter,
+            options=options,
+        )
+        if not filename:
+            return filename
+        if not default_ext:
+            return filename
+        base, ext = os.path.splitext(filename)
+        if ext:
+            return filename
+        # If we get here, the user has entered a filename with no extension but
+        # the caller wants one
+        filename = base + default_ext
+        # But there is some possibility that we have bypassed the existence
+        # check; e.g. the user types "thing", Qt checks that "thing" doesn't
+        # exist, but have now renamed filename to "thing.pdf" and that does
+        # exist.
+        if not os.path.exists(filename):
+            # OK, it doesn't exist.
+            return filename
+        # noinspection PyTypeChecker
+        reply = QMessageBox.question(
+            parent,
+            "Confirm overwrite",
+            "Are you sure you want to overwrite {!r}?".format(filename),
+            QMessageBox.Yes,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            return filename
+        # Otherwise, we cycle around the while loop.
 
 
 # =============================================================================
@@ -679,10 +745,10 @@ class MainWindow(QWidget):
 
     def on_save_data(self) -> None:
         # noinspection PyArgumentList
-        filename, _ = QFileDialog.getSaveFileName(
-            parent=self,
+        filename = get_save_filename(
             caption="Save data as",
-            filter=JSON_FILE_FILTER,
+            filetype_filter=JSON_FILE_SAVE_FILTER,
+            default_ext=".json"
         )
         if not filename:
             return
@@ -693,7 +759,7 @@ class MainWindow(QWidget):
         filename, _ = QFileDialog.getOpenFileName(
             parent=self,
             caption="Load data",
-            filter=JSON_FILE_FILTER,
+            filter=JSON_FILE_LOAD_FILTER,
         )
         if not filename:
             return
@@ -753,16 +819,18 @@ class MainWindow(QWidget):
 
     def on_save_picture(self) -> None:
         if USE_PDF_EXPORT:
-            filename_filter = PDF_FILE_FILTER
+            filename_filter = "PDF files (*.pdf)"
+            default_ext = ".pdf"
         elif USE_SVG_EXPORT:
-            filename_filter = SVG_FILE_FILTER
+            filename_filter = "SVG files (*.svg)"
+            default_ext = ".svg"
         else:
-            filename_filter = BITMAP_FILE_FILTER
-        # noinspection PyArgumentList
-        filename, _ = QFileDialog.getSaveFileName(
-            parent=self,
+            filename_filter = "PNG files (*.png)"
+            default_ext = ".png"
+        filename = get_save_filename(
             caption="Save image as",
-            filter=filename_filter,
+            filetype_filter=filename_filter,
+            default_ext=default_ext,
         )
         if not filename:
             return
