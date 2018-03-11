@@ -12,6 +12,34 @@ SOFTWARE PREREQUISITES
 
     sudo pip2 install ino  # uses system Python 2 to install ino
 
+PERMISSION PREREQUISITES
+------------------------
+
+-   The Arduino should show up in the output of "lsusb" like this:
+        Bus 003 Device 005: ID 2341:0043 Arduino SA Uno R3 (CDC ACM)
+    and there should be a serial device called e.g.
+        /dev/ttyACM0
+    To be able to write to this device, you need to add your user to the
+    "dialout" group.
+
+    METHOD 1: edit /etc/group directly
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Use a command like
+        sudo pico /etc/group
+    or your favourite text editor. The relevant line should look like:
+        dialout:x:20:myusername
+    or if multiple users are in this group, like this:
+        dialout:x:20:myusername,otheruser,thirduser
+
+    METHOD 2: adduser
+    ~~~~~~~~~~~~~~~~~
+    Alternatively, this cleaner method:
+        sudo adduser myusername dialout
+
+-   You will have to log out and log back in again before you gain this
+    permission.
+
+
 INSTALLING THE ECG PROGRAM
 --------------------------
 
