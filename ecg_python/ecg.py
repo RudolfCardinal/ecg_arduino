@@ -21,6 +21,7 @@
 
 Based on:
     https://github.com/TDeagan/pyEKGduino
+        ... manual measurement of QT
     https://github.com/pbmanis/EKGMonitor
         ... more sophisticated signal processing
 
@@ -30,6 +31,7 @@ import argparse
 from contextlib import contextmanager
 import json
 import logging
+import math
 import os
 from pdb import set_trace
 import sys
@@ -50,6 +52,16 @@ from cardinal_pythonlib.dsp import (
 from cardinal_pythonlib.json.serialize import JsonClassEncoder, json_decode
 from cardinal_pythonlib.maths_py import normal_round_float
 from cardinal_pythonlib.logs import main_only_quicksetup_rootlogger
+from cardio.core.ecg_batch import EcgBatch
+from cardio.core.ecg_dataset import EcgDataset
+from cardio.dataset.dataset.dataset import Dataset
+from cardio.dataset.dataset.pipeline import Pipeline
+from cardio.dataset.dataset.dsindex import FilesIndex
+from cardio.pipelines import (
+    hmm_predict_pipeline,
+    hmm_preprocessing_pipeline,
+    hmm_train_pipeline,
+)
 import numpy as np
 from pendulum import Pendulum
 from PyQt5.QtCore import (
@@ -91,6 +103,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.units import cm
+from scipy.io import wavfile
 from serial import (  # pip install pyserial
     EIGHTBITS,
     PARITY_NONE,
@@ -191,6 +204,18 @@ ECG_PEN = QPen(QColor(255, 0, 0))
 ECG_PEN.setCosmetic(True)  # don't scale the pen width!
 ECG_PEN.setWidth(1)
 DATETIME_FORMAT = "%a %d %B %Y, %H:%M"  # e.g. Wed 24 July 2013, 20:04
+
+# -----------------------------------------------------------------------------
+# Cardio annotation names
+# -----------------------------------------------------------------------------
+
+HMM_ANNOTATION = "hmm_annotation"  # fixed, I think; don't alter it
+DEFAULT_QTDB_DIR = os.path.realpath(
+    os.path.join(os.path.dirname(__file__), os.pardir,
+                 "physionet_data", "qtdb"))
+DEFAULT_QT_PROCESSOR = os.path.realpath(
+    os.path.join(os.path.dirname(__file__), os.pardir,
+                 "physionet_data", "qt_processor.dll"))
 
 
 # =============================================================================
@@ -304,6 +329,51 @@ def get_save_filename(
         # Otherwise, we cycle around the while loop.
 
 
+def save_ecg_as_wav(data: np.array,
+                    filename: str,
+                    sampling_freq_hz: int) -> None:
+    log.debug("Writing ECG as WAV file to {!r}".format(filename))
+    wavfile.write(filename, sampling_freq_hz, data)
+
+
+def get_cardio_ecg_batch_with_data_from_files(
+        filespec: str,  # e.g. "/tmp/*.wav"; "/some/file.wav"
+        index_no_ext: bool = True,
+        fmt: str = "wav",
+        sort: bool = True,
+        pipeline: Pipeline = None,
+        show_ecg: bool = False) -> EcgBatch:
+    log.debug("Reading ECG from file(s) {!r} with format {}".format(
+        filespec, fmt))
+    index = FilesIndex(path=filespec, no_ext=index_no_ext, sort=sort)
+    # log.warning("index.indices: {!r}".format(index.indices))
+    first_index = index.indices[0]
+    # log.warning("first_index: {!r}".format(index.indices))
+    dataset = Dataset(index=index, batch_class=EcgBatch)
+    if pipeline:
+        batch = (dataset >> pipeline).next_batch()
+        if show_ecg:
+            batch.show_ecg(first_index, annot=HMM_ANNOTATION)
+    else:
+        # https://github.com/analysiscenter/cardio/blob/master/tutorials/III.Models.ipynb  # noqa
+        batch = dataset.next_batch(batch_size=1)
+        batch = batch.load(fmt=fmt, components=['signal', 'meta'])
+        if show_ecg:
+            batch.show_ecg(first_index)
+        meta = batch[first_index].meta
+        log.info(
+            "Calculated parameters: "
+            "HR={hr}, PQ={pq}, QRS={qrs}, QT={qt}".format(
+                hr=meta["hr"],
+                pq=meta["pq"],
+                qrs=meta["qrs"],
+                qt=meta["qt"],
+            )
+        )
+    # log.debug("batch={!r}; type={!r}".format(batch, type(batch)))
+    return batch
+
+
 # =============================================================================
 # Input validation
 # =============================================================================
@@ -341,7 +411,7 @@ def get_valid_int(x: str, default: int,
 class AdvancedWindow(QDialog):
     # noinspection PyArgumentList
     def __init__(self,
-                 ecg_info: ReturnTuple,
+                 biosppy_ecg_info: ReturnTuple,
                  abs_voltage: bool,
                  parent: QWidget = None) -> None:
         """
@@ -362,10 +432,10 @@ class AdvancedWindow(QDialog):
                 Instantaneous heart rate (bpm).
         """
         super().__init__(parent=parent)
-        self.ecg_info = ecg_info
-        t = ecg_info['ts']  # type: np.ndarray
-        y = ecg_info['filtered']  # type: np.ndarray
-        rr_peak_indices = ecg_info['rpeaks']  # type: np.ndarray
+        self.ecg_info = biosppy_ecg_info
+        t = biosppy_ecg_info['ts']  # type: np.ndarray
+        y = biosppy_ecg_info['filtered']  # type: np.ndarray
+        rr_peak_indices = biosppy_ecg_info['rpeaks']  # type: np.ndarray
         r_peak_t = np.take(t, rr_peak_indices)
         r_peak_y = np.take(y, rr_peak_indices)
 
@@ -381,8 +451,8 @@ class AdvancedWindow(QDialog):
             }
         )
         self.plot_filtered.plot(
-            x=ecg_info['ts'],
-            y=ecg_info['filtered']
+            x=biosppy_ecg_info['ts'],
+            y=biosppy_ecg_info['filtered']
         )
         self.plot_filtered.plot(
             x=r_peak_t,
@@ -400,8 +470,8 @@ class AdvancedWindow(QDialog):
             }
         )
         self.plot_hr.plot(
-            x=ecg_info['heart_rate_ts'],
-            y=ecg_info['heart_rate']
+            x=biosppy_ecg_info['heart_rate_ts'],
+            y=biosppy_ecg_info['heart_rate']
         )
         if t.size >= 2:
             # Set the same X scale as the ECG.
@@ -422,7 +492,8 @@ class AdvancedWindow(QDialog):
         self.plot_poincare.plot(
             x=rr_intervals_t,
             y=rr_intervals_t_plus_1,
-            pen=(200, 200, 200),
+            # pen=(200, 200, 200),
+            pen=None,
             symbolBrush=(255, 0, 0),
             symbolPen='w'
         )
@@ -477,7 +548,87 @@ class MainWindow(QWidget):
             background='w'  # white
         )
         self.curve = self.plot_ecg.plot(pen=ECG_PEN)
-        
+
+        # Manual QT measurements
+
+        r1_pen = QPen(Qt.red, 0, Qt.SolidLine)
+        self.r1_line = self.plot_ecg.addLine(x=.5, pen=r1_pen, movable=True)
+        self.r1_line.sigPositionChangeFinished.connect(self.r1_move)
+
+        r2_pen = QPen(Qt.darkYellow, 0, Qt.SolidLine)
+        self.r2_line = self.plot_ecg.addLine(x=1, pen=r2_pen, movable=True)
+        self.r2_line.sigPositionChangeFinished.connect(self.r2_move)
+
+        q_pen = QPen(Qt.green, 0, Qt.SolidLine)
+        self.q_line = self.plot_ecg.addLine(x=1.5, pen=q_pen, movable=True)
+        self.q_line.sigPositionChangeFinished.connect(self.q_move)
+
+        t_pen = QPen(Qt.blue, 0, Qt.SolidLine)
+        self.t_line = self.plot_ecg.addLine(x=2, pen=t_pen, movable=True)
+        self.t_line.sigPositionChangeFinished.connect(self.t_move)
+
+        r1_lbl = QLabel('R1 = ')
+        self.r1_val_lbl = QLabel('0')
+        r1_palette = QPalette()
+        r1_palette.setColor(QPalette.Foreground, Qt.red)
+        r1_lbl.setPalette(r1_palette)
+
+        r2_lbl = QLabel('R2 = ')
+        self.r2_val_lbl = QLabel('0')
+        r2_palette = QPalette()
+        r2_palette.setColor(QPalette.Foreground, Qt.darkYellow)
+        r2_lbl.setPalette(r2_palette)
+
+        q_lbl = QLabel('Q = ')
+        self.q_val_lbl = QLabel('0')
+        q_palette = QPalette()
+        q_palette.setColor(QPalette.Foreground, Qt.green)
+        q_lbl.setPalette(q_palette)
+
+        t_lbl = QLabel('T = ')
+        self.t_val_lbl = QLabel('0')
+        t_palette = QPalette()
+        t_palette.setColor(QPalette.Foreground, Qt.blue)
+        t_lbl.setPalette(t_palette)
+
+        rr_lbl = QLabel('RR (s) = ')
+        self.rr_val_lbl = QLabel('0')
+
+        h_lbl = QLabel('Heart rate (bpm) = ')
+        self.h_val_lbl = QLabel('0')
+
+        qt_lbl = QLabel('QT (s) = ')
+        self.qt_val_lbl = QLabel('0')
+
+        qtc_lbl = QLabel('QTc, Bazett formula (s) = ')
+        self.qtc_val_lbl = QLabel('0')
+
+        manual_qt_label = QLabel(
+            "MANUAL measurement of RR and QT intervals (drag the vertical "
+            "lines; values ONLY reflect what you have set)")
+
+        qtlayout = QGridLayout()
+        qt_label_row_1 = 1
+        qt_label_row_2 = 2
+        qt_label_row_3 = 3
+        qtlayout.addWidget(manual_qt_label, qt_label_row_1, 0, 1, 4)
+        qtlayout.addWidget(r1_lbl, qt_label_row_2, 0, Qt.AlignRight)
+        qtlayout.addWidget(self.r1_val_lbl, qt_label_row_2, 1, Qt.AlignLeft)
+        qtlayout.addWidget(r2_lbl, qt_label_row_2, 2, Qt.AlignRight)
+        qtlayout.addWidget(self.r2_val_lbl, qt_label_row_2, 3, Qt.AlignLeft)
+        qtlayout.addWidget(q_lbl, qt_label_row_2, 4, Qt.AlignRight)
+        qtlayout.addWidget(self.q_val_lbl, qt_label_row_2, 5, Qt.AlignLeft)
+        qtlayout.addWidget(t_lbl, qt_label_row_2, 6, Qt.AlignRight)
+        qtlayout.addWidget(self.t_val_lbl, qt_label_row_2, 7, Qt.AlignLeft)
+        qtlayout.addWidget(rr_lbl, qt_label_row_3, 0, Qt.AlignRight)
+        qtlayout.addWidget(self.rr_val_lbl, qt_label_row_3, 1, Qt.AlignLeft)
+        qtlayout.addWidget(h_lbl, qt_label_row_3, 2, Qt.AlignRight)
+        qtlayout.addWidget(self.h_val_lbl, qt_label_row_3, 3, Qt.AlignLeft)
+        qtlayout.addWidget(qt_lbl, qt_label_row_3, 4, Qt.AlignRight)
+        qtlayout.addWidget(self.qt_val_lbl, qt_label_row_3, 5, Qt.AlignLeft)
+        qtlayout.addWidget(qtc_lbl, qt_label_row_3, 6, Qt.AlignRight)
+        qtlayout.addWidget(self.qtc_val_lbl, qt_label_row_3, 7, Qt.AlignLeft)
+
         # Person
 
         name_lbl = QLabel("Name")
@@ -664,8 +815,54 @@ class MainWindow(QWidget):
         layout.addWidget(hr_static_lbl, summary_hr_row, 0)
         layout.addWidget(self.hr_lbl, summary_hr_row, 1)
 
+        qt_summary_row = summary_hr_row + 1
+        n_qt_rows = 3
+        layout.addLayout(qtlayout, qt_summary_row, 0, n_qt_rows, 5)
+
         self.setLayout(layout)
         self.set_defaults(trigger_ecg_update=False)
+
+    def r1_move(self):
+        r1 = self.r1_line.value()
+        self.r1_val_lbl.setText(str("%.3f" % r1))
+        self.calc_qtc()
+
+    def r2_move(self):
+        r2 = self.r2_line.value()
+        self.r2_val_lbl.setText(str("%.3f" % r2))
+        self.calc_qtc()
+
+    def q_move(self):
+        q = self.q_line.value()
+        self.q_val_lbl.setText(str("%.3f" % q))
+        self.calc_qtc()
+
+    def t_move(self):
+        t = self.t_line.value()
+        self.t_val_lbl.setText(str("%.3f" % t))
+        self.calc_qtc()
+
+    def calc_qtc(self):
+        r1 = self.r1_line.value()
+        r2 = self.r2_line.value()
+        q = self.q_line.value()
+        t = self.t_line.value()
+
+        rr_s = r2 - r1
+        self.rr_val_lbl.setText(str("%.3f" % rr_s))
+
+        hr_bpm = 60 / rr_s
+        self.h_val_lbl.setText(str("%.3f" % hr_bpm))
+
+        qt_s = (t - q)
+        self.qt_val_lbl.setText(str("%.3f" % qt_s))
+
+        try:
+            # Bazett formula:
+            qtc_s = qt_s / math.sqrt(rr_s)
+            self.qtc_val_lbl.setText(str("%.3f" % qtc_s))
+        except ValueError:
+            self.qtc_val_lbl.setText("?")
 
     def set_defaults(self, trigger_ecg_update: bool = True) -> None:
         with block_qt_signals_from(self.buffer_duration_edit):
@@ -699,6 +896,11 @@ class MainWindow(QWidget):
 
         self.update_from_settings(trigger_ecg_update=trigger_ecg_update)
         self.ecg_mode_btn.click()
+
+        self.r1_move()
+        self.r2_move()
+        self.q_move()
+        self.t_move()
 
     def on_arduino_awake(self) -> None:
         self.continuous_btn.setEnabled(True)
@@ -1135,12 +1337,14 @@ class MainWindow(QWidget):
         self.close()
 
     def view_advanced(self) -> None:
-        ecg_info = self.app.get_ecg_info()
-        if ecg_info is None:
+        # Use
+        biosppy_ecg_info = self.app.get_biosppy_ecg_info()
+        if biosppy_ecg_info is None:
             # noinspection PyCallByClass,PyArgumentList
             QMessageBox.warning(self, "Advanced plots", "Insufficient data")
             return
-        aw = AdvancedWindow(ecg_info=ecg_info,
+        cardio_ecg_info = self.app.get_cardio_ecg_info()
+        aw = AdvancedWindow(biosppy_ecg_info=biosppy_ecg_info,
                             abs_voltage=self.ecg.abs_voltage,
                             parent=self)
         aw.exec_()  # modal
@@ -1188,16 +1392,21 @@ class EcgController(QObject):
     }
 
     def __init__(self,
-                 port_device: str,
-                 baud: int,
-                 abs_voltage: bool,
-                 ecg_gain: float,
+                 port_device: str = "",
+                 baud: int = DEFAULT_BAUD_RATE,
+                 abs_voltage: bool = False,
+                 ecg_gain: float = DEFAULT_GAIN,
                  buffer_duration_s: float = DEFAULT_ECG_DURATION_S,
                  sampling_freq_hz: float = DEFAULT_SAMPLING_FREQ_HZ,
-                 parent: QObject = None) -> None:
+                 parent: QObject = None,
+                 qtdb_dir: str = "",
+                 qt_pipeline_filename: str = "") -> None:
         super().__init__(parent=parent)
         self.abs_voltage = abs_voltage
         self.ecg_gain = ecg_gain
+        self.qtdb_dir = qtdb_dir
+        self.qt_pipeline_filename = qt_pipeline_filename
+        self._qt_segmentation_pipeline = None
 
         self.updates_enabled = True
 
@@ -1444,7 +1653,7 @@ class EcgController(QObject):
                     dtype=DTYPE)
         return self.cached_time_axis
 
-    def get_data(self, debug: bool = True) -> np.array:
+    def get_data(self, debug: bool = True, prefilter: bool = True) -> np.array:
         data = np.array(self.data, dtype=DTYPE)
         if not self.data:  # this truth-test doesn't work for np.array()
             return data  # filters will crash on empty data
@@ -1462,6 +1671,8 @@ class EcgController(QObject):
             if debug:
                 log.critical("In mV: min {}, max {}".format(
                     np.min(data), np.max(data)))
+        if not prefilter:
+            return data
         # Invert? Centre?
         if self.invert:
             data = MAX_INPUT - data
@@ -1608,6 +1819,83 @@ class EcgController(QObject):
     def quiet(self) -> None:
         self.send_command(CMD_QUIET)
 
+    def get_biosppy_ecg_info(self,
+                             ydata: np.array = None) -> Optional[ReturnTuple]:
+        """
+        Parse an ECG through biosppy and return its analysis.
+        http://biosppy.readthedocs.io/en/stable/
+        """
+        if ydata is None:
+            ydata = self.get_data()
+        try:
+            ecg_info = biosppy_ecg(signal=ydata,
+                                   sampling_rate=self.sampling_freq_hz,
+                                   show=False)  # type: ReturnTuple
+        except ValueError:  # as e:
+            # Generally: not enough data (or not interpretable as ECG)
+            # log.debug("Can't summarize ECG: {}".format(e))
+            ecg_info = None
+        return ecg_info
+
+    def get_cardio_ecg_info(self, ydata: np.array = None,
+                            show_ecg: bool = False,
+                            prefilter: bool = True):
+        """
+        Parse an ECG through cardio
+        
+        https://github.com/analysiscenter/cardio
+        https://medium.com/data-analysis-center/cardio-framework-for-deep-research-of-electrocardiograms-2a38a0673b8e
+        https://github.com/analysiscenter/cardio/blob/master/tutorials/I.CardIO.ipynb
+        """  # noqa
+        if ydata is None:
+            ydata = self.get_data(prefilter=prefilter)
+        filename_stem = "ecg"
+        filename_with_ext = filename_stem + ".wav"
+        with TemporaryDirectory() as dir:
+            filename = os.path.join(dir, filename_with_ext)
+            sampling_freq_hz = int(self.sampling_freq_hz)
+            if sampling_freq_hz != self.sampling_freq_hz:
+                log.warning(
+                    "Rounding non-integer sampling frequency from {} "
+                    "to {}".format(self.sampling_freq_hz, sampling_freq_hz))
+            save_ecg_as_wav(data=ydata,
+                            filename=filename,
+                            sampling_freq_hz=sampling_freq_hz)
+            batch = get_cardio_ecg_batch_with_data_from_files(
+                filespec=filename,
+                fmt="wav",
+                # pipeline=None,
+                pipeline=self.qt_segmentation_pipeline,
+                show_ecg=show_ecg
+            )
+        return batch
+
+    @property
+    def qt_segmentation_pipeline(self):
+        if self._qt_segmentation_pipeline is None:
+            if not os.path.exists(self.qt_pipeline_filename):
+                # Train one. This can be slow.
+                # https://github.com/analysiscenter/cardio/blob/master/tutorials/III.Models.ipynb  # noqa
+                log.warning("Training QT processing pipeline")
+                signals_mask = os.path.join(self.qtdb_dir, "*.hea")
+                log.debug("signals_mask: {!r}".format(signals_mask))
+                qt_dataset = EcgDataset(path=signals_mask,
+                                        no_ext=True, sort=True)
+                pipeline = hmm_preprocessing_pipeline()
+                ppl_inits = (qt_dataset >> pipeline).run()
+                pipeline = hmm_train_pipeline(ppl_inits)
+                ppl_train = (qt_dataset >> pipeline).run()
+                # Now save it for next time
+                log.info("Saving QT pipeline to {!r}".format(
+                    self.qt_pipeline_filename))
+                ppl_train.save_model("HMM", path=self.qt_pipeline_filename)
+            # Load a pre-trained pipeline
+            log.info("Loading QT pipeline from {!r}".format(
+                self.qt_pipeline_filename))
+            self._qt_segmentation_pipeline = hmm_predict_pipeline(
+                self.qt_pipeline_filename, annot=HMM_ANNOTATION)
+        return self._qt_segmentation_pipeline
+
 
 # =============================================================================
 # Application
@@ -1623,7 +1911,9 @@ class EcgApplication(QApplication):
             abs_voltage: bool,
             ecg_gain: float,
             update_ecg_every_ms: int = UPDATE_ECG_EVERY_MS,
-            update_analytics_every_ms: int = UPDATE_ANALYTICS_EVERY_MS
+            update_analytics_every_ms: int = UPDATE_ANALYTICS_EVERY_MS,
+            qtdb_dir: str = "",
+            qt_pipeline_filename: str = ""
     ) -> None:
         super().__init__(argv)
         self.ecg = EcgController(port_device=port_device,
@@ -1631,7 +1921,9 @@ class EcgApplication(QApplication):
                                  sampling_freq_hz=sampling_freq_hz,
                                  abs_voltage=abs_voltage,
                                  ecg_gain=ecg_gain,
-                                 parent=self)
+                                 parent=self,
+                                 qtdb_dir=qtdb_dir,
+                                 qt_pipeline_filename=qt_pipeline_filename)
         self.mw = MainWindow(app=self)
         self.mw.show()
         self.timer = QTimer(parent=self)
@@ -1660,18 +1952,19 @@ class EcgApplication(QApplication):
         if self.timer.isActive():
             self.timer.stop()
 
-    def get_ecg_info(self, ydata: np.array = None) -> Optional[ReturnTuple]:
-        if ydata is None:
-            ydata = self.ecg.get_data()
-        try:
-            ecg_info = biosppy_ecg(signal=ydata,
-                                   sampling_rate=self.ecg.sampling_freq_hz,
-                                   show=False)  # type: ReturnTuple
-        except ValueError:  # as e:
-            # Generally: not enough data (or not interpretable as ECG)
-            # log.debug("Can't summarize ECG: {}".format(e))
-            ecg_info = None
-        return ecg_info
+    def get_biosppy_ecg_info(self,
+                             ydata: np.array = None) -> Optional[ReturnTuple]:
+        """
+        Parse an ECG through biosppy and return its analysis.
+        """
+        return self.ecg.get_biosppy_ecg_info(ydata)
+
+    def get_cardio_ecg_info(self, ydata: np.array = None,
+                            show_ecg: bool = False):
+        """
+        Parse an ECG through cardio
+        """
+        return self.ecg.get_cardio_ecg_info(ydata=ydata, show_ecg=show_ecg)
 
     def on_data_changed(self, force_update: bool = False) -> None:
         # log.debug("EcgApplication: on_data_changed")
@@ -1699,7 +1992,7 @@ class EcgApplication(QApplication):
         if update_analytics:
             # log.debug("Updating analytics")
             self.last_analytics_update_at = now
-            ecg_info = self.get_ecg_info(ydata)
+            ecg_info = self.get_biosppy_ecg_info(ydata)
             self.mw.update_analysis(ecg_info)
 
 
@@ -1814,6 +2107,15 @@ Note also:
              "Gain (voltage multiple) from the ECG sensor (e.g. 0 to about 3 "
              "mV) to the Arduino (0 to +{}V)".format(MAX_OUTPUT_VOLTAGE_V)
     )
+    parser.add_argument(
+        "--qtdb_dir", type=str, default=DEFAULT_QTDB_DIR,
+        help="Root directory of the Physionet 'qtdb' database of annotated "
+             "QT intervals, to train our QT parser"
+    )
+    parser.add_argument(
+        "--qt_pipeline", type=str, default=DEFAULT_QT_PROCESSOR,
+        help="Saved QT processing pipeline"
+    )
     args = parser.parse_args()
 
     ecg_app = EcgApplication(argv=sys.argv,
@@ -1821,7 +2123,9 @@ Note also:
                              baud=args.baud,
                              sampling_freq_hz=args.sampling_freq_hz,
                              abs_voltage=args.abs_voltage,
-                             ecg_gain=args.gain)
+                             ecg_gain=args.gain,
+                             qtdb_dir=args.qtdb_dir,
+                             qt_pipeline_filename=args.qt_pipeline)
     sys.exit(ecg_app.exec_())
 
 

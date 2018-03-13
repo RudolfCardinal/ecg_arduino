@@ -1,0 +1,12 @@
+Analysing QT intervals
+======================
+
+We'll use the Cardio toolkit.
+It has a model that can be trained on predefined QT databases.
+
+From e.g. the physionet_data directory:
+
+    # See https://physionet.org/faq.shtml#downloading-databases
+
+    rsync physionet.org::  # lists available databases
+    rsync -Cavz physionet.org::qtdb ./qtdb  # download the qtdb database

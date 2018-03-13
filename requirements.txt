@@ -8,3 +8,9 @@ pyserial==3.4
 reportlab==3.4.0
 scipy==1.0.0
 svglib==0.8.1
+
+git+https://github.com/analysiscenter/cardio.git  # for QT analysis, etc., I hope; version used as of 2018-03-12
+dicom==0.9.9  # required by cardio (or ImportError) but not installed by it
+tensorflow==1.6.0  # for cardio pipelines
+hmmlearn==0.2.0  # for cardio pipelines
+keras==2.1.5  # for cardio pipelines

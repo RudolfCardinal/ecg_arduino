@@ -1,5 +1,6 @@
-core
 .idea/
+__pycache__
+core
 demo_images/
 dfrobot/
 ecg_arduino/.build/
@@ -7,5 +8,6 @@ ecg_arduino/obj/
 ecg_arduino/lib/
 hardware_info/
 junk_data/
+physionet_data/
 saved_personal_data/
 
