@@ -29,12 +29,14 @@ Based on:
 
 import argparse
 from contextlib import contextmanager
+from functools import partial
 import json
 import logging
 import math
 import os
 from pdb import set_trace
 import sys
+# import subprocess
 from tempfile import TemporaryDirectory
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -54,14 +56,17 @@ from cardinal_pythonlib.maths_py import normal_round_float
 from cardinal_pythonlib.logs import main_only_quicksetup_rootlogger
 from cardio.core.ecg_batch import EcgBatch
 from cardio.core.ecg_dataset import EcgDataset
+from cardio.dataset.dataset.named_expr import B
 from cardio.dataset.dataset.dataset import Dataset
 from cardio.dataset.dataset.pipeline import Pipeline
 from cardio.dataset.dataset.dsindex import FilesIndex
 from cardio.pipelines import (
-    hmm_predict_pipeline,
+    # hmm_predict_pipeline,
     hmm_preprocessing_pipeline,
     hmm_train_pipeline,
 )
+from cardio.models.hmm import HMModel, prepare_hmm_input
+
 import numpy as np
 from pendulum import Pendulum
 from PyQt5.QtCore import (
@@ -91,7 +96,7 @@ from PyQt5.QtWidgets import (
     QRadioButton,
     QWidget,
 )
-from pyqtgraph import PlotWidget
+from pyqtgraph import InfiniteLine, PlotWidget
 from pyqtgraph.graphicsItems import PlotItem
 from pyqtgraph.exporters import ImageExporter, SVGExporter
 from pyqtgraph.parametertree import Parameter
@@ -205,6 +210,14 @@ ECG_PEN.setCosmetic(True)  # don't scale the pen width!
 ECG_PEN.setWidth(1)
 DATETIME_FORMAT = "%a %d %B %Y, %H:%M"  # e.g. Wed 24 July 2013, 20:04
 
+P_COLOUR = QColor(0, 200, 0)
+Q_COLOUR = QColor(200, 200, 0)
+S_COLOUR = QColor(200, 0, 200)
+T_COLOUR = QColor(0, 0, 200)
+R1_COLOUR = QColor(200, 0, 0)
+R2_COLOUR = QColor(200, 0, 0)
+HR_COLOUR = QColor(200, 0, 0)
+
 # -----------------------------------------------------------------------------
 # Cardio annotation names
 # -----------------------------------------------------------------------------
@@ -215,7 +228,7 @@ DEFAULT_QTDB_DIR = os.path.realpath(
                  "physionet_data", "qtdb"))
 DEFAULT_QT_PROCESSOR = os.path.realpath(
     os.path.join(os.path.dirname(__file__), os.pardir,
-                 "physionet_data", "qt_processor.dll"))
+                 "physionet_data", "ecg_qt_processor.hmm"))
 
 
 # =============================================================================
@@ -336,13 +349,43 @@ def save_ecg_as_wav(data: np.array,
     wavfile.write(filename, sampling_freq_hz, data)
 
 
+class CardioQtResult(object):
+    def __init__(self, batch: EcgBatch) -> None:
+        first_index = batch.index.indices[0]
+        meta = batch[first_index].meta
+        self.hr_bpm = meta["hr"]
+        self.pq_s = meta["pq"]
+        self.qrs_s = meta["qrs"]
+        self.qt_s = meta["qt"]
+        log.critical(meta.keys())
+
+    @property
+    def rr_s(self) -> float:
+        return 60 / self.hr_bpm
+
+    @property
+    def qtc_s(self) -> float:
+        return self.qt_s / math.sqrt(self.rr_s)
+
+
 def get_cardio_ecg_batch_with_data_from_files(
         filespec: str,  # e.g. "/tmp/*.wav"; "/some/file.wav"
-        index_no_ext: bool = True,
+        index_no_ext: bool = False,
         fmt: str = "wav",
         sort: bool = True,
         pipeline: Pipeline = None,
         show_ecg: bool = False) -> EcgBatch:
+    """
+    Works now. However, performance not great. Specimen result:
+        HR=165.74585635359117 s, PQ=0.078 s, QRS=0.072 s, QT=0.1145 s
+    ... for a manual calculation of:
+        HR 106 [biosppy]
+        RR = 0.558 [manual] => HR 107 bpm for that beat
+        QT = 0.29, QTc = 0.388
+    So the CardIO analysis is unreliable.
+    Its segmentation looks OK-ish, though imperfect; it's not crazily out, but
+    it's definitely not good enough.
+    """
     log.debug("Reading ECG from file(s) {!r} with format {}".format(
         filespec, fmt))
     index = FilesIndex(path=filespec, no_ext=index_no_ext, sort=sort)
@@ -350,8 +393,14 @@ def get_cardio_ecg_batch_with_data_from_files(
     first_index = index.indices[0]
     # log.warning("first_index: {!r}".format(index.indices))
     dataset = Dataset(index=index, batch_class=EcgBatch)
-    if pipeline:
-        batch = (dataset >> pipeline).next_batch()
+    if pipeline is not None:
+        with Pipeline() as p:
+            full_pipeline = (
+                p.load(fmt=fmt, components=['signal', 'meta']) +
+                pipeline
+            )
+        p2 = (dataset >> full_pipeline)  # type: Pipeline
+        batch = p2.next_batch(batch_size=1)
         if show_ecg:
             batch.show_ecg(first_index, annot=HMM_ANNOTATION)
     else:
@@ -360,16 +409,16 @@ def get_cardio_ecg_batch_with_data_from_files(
         batch = batch.load(fmt=fmt, components=['signal', 'meta'])
         if show_ecg:
             batch.show_ecg(first_index)
-        meta = batch[first_index].meta
-        log.info(
-            "Calculated parameters: "
-            "HR={hr}, PQ={pq}, QRS={qrs}, QT={qt}".format(
-                hr=meta["hr"],
-                pq=meta["pq"],
-                qrs=meta["qrs"],
-                qt=meta["qt"],
-            )
+    result = CardioQtResult(batch)
+    log.info(
+        "Calculated parameters: "
+        "HR={hr} s, PQ={pq} s, QRS={qrs} s, QT={qt} s".format(
+            hr=result.hr_bpm,
+            pq=result.pq_s,
+            qrs=result.qrs_s,
+            qt=result.qt_s,
         )
+    )
     # log.debug("batch={!r}; type={!r}".format(batch, type(batch)))
     return batch
 
@@ -549,86 +598,6 @@ class MainWindow(QWidget):
         )
         self.curve = self.plot_ecg.plot(pen=ECG_PEN)
 
-        # Manual QT measurements
-
-        r1_pen = QPen(Qt.red, 0, Qt.SolidLine)
-        self.r1_line = self.plot_ecg.addLine(x=.5, pen=r1_pen, movable=True)
-        self.r1_line.sigPositionChangeFinished.connect(self.r1_move)
-
-        r2_pen = QPen(Qt.darkYellow, 0, Qt.SolidLine)
-        self.r2_line = self.plot_ecg.addLine(x=1, pen=r2_pen, movable=True)
-        self.r2_line.sigPositionChangeFinished.connect(self.r2_move)
-
-        q_pen = QPen(Qt.green, 0, Qt.SolidLine)
-        self.q_line = self.plot_ecg.addLine(x=1.5, pen=q_pen, movable=True)
-        self.q_line.sigPositionChangeFinished.connect(self.q_move)
-
-        t_pen = QPen(Qt.blue, 0, Qt.SolidLine)
-        self.t_line = self.plot_ecg.addLine(x=2, pen=t_pen, movable=True)
-        self.t_line.sigPositionChangeFinished.connect(self.t_move)
-
-        r1_lbl = QLabel('R1 = ')
-        self.r1_val_lbl = QLabel('0')
-        r1_palette = QPalette()
-        r1_palette.setColor(QPalette.Foreground, Qt.red)
-        r1_lbl.setPalette(r1_palette)
-
-        r2_lbl = QLabel('R2 = ')
-        self.r2_val_lbl = QLabel('0')
-        r2_palette = QPalette()
-        r2_palette.setColor(QPalette.Foreground, Qt.darkYellow)
-        r2_lbl.setPalette(r2_palette)
-
-        q_lbl = QLabel('Q = ')
-        self.q_val_lbl = QLabel('0')
-        q_palette = QPalette()
-        q_palette.setColor(QPalette.Foreground, Qt.green)
-        q_lbl.setPalette(q_palette)
-
-        t_lbl = QLabel('T = ')
-        self.t_val_lbl = QLabel('0')
-        t_palette = QPalette()
-        t_palette.setColor(QPalette.Foreground, Qt.blue)
-        t_lbl.setPalette(t_palette)
-
-        rr_lbl = QLabel('RR (s) = ')
-        self.rr_val_lbl = QLabel('0')
-
-        h_lbl = QLabel('Heart rate (bpm) = ')
-        self.h_val_lbl = QLabel('0')
-
-        qt_lbl = QLabel('QT (s) = ')
-        self.qt_val_lbl = QLabel('0')
-
-        qtc_lbl = QLabel('QTc, Bazett formula (s) = ')
-        self.qtc_val_lbl = QLabel('0')
-
-        manual_qt_label = QLabel(
-            "MANUAL measurement of RR and QT intervals (drag the vertical "
-            "lines; values ONLY reflect what you have set)")
-
-        qtlayout = QGridLayout()
-        qt_label_row_1 = 1
-        qt_label_row_2 = 2
-        qt_label_row_3 = 3
-        qtlayout.addWidget(manual_qt_label, qt_label_row_1, 0, 1, 4)
-        qtlayout.addWidget(r1_lbl, qt_label_row_2, 0, Qt.AlignRight)
-        qtlayout.addWidget(self.r1_val_lbl, qt_label_row_2, 1, Qt.AlignLeft)
-        qtlayout.addWidget(r2_lbl, qt_label_row_2, 2, Qt.AlignRight)
-        qtlayout.addWidget(self.r2_val_lbl, qt_label_row_2, 3, Qt.AlignLeft)
-        qtlayout.addWidget(q_lbl, qt_label_row_2, 4, Qt.AlignRight)
-        qtlayout.addWidget(self.q_val_lbl, qt_label_row_2, 5, Qt.AlignLeft)
-        qtlayout.addWidget(t_lbl, qt_label_row_2, 6, Qt.AlignRight)
-        qtlayout.addWidget(self.t_val_lbl, qt_label_row_2, 7, Qt.AlignLeft)
-        qtlayout.addWidget(rr_lbl, qt_label_row_3, 0, Qt.AlignRight)
-        qtlayout.addWidget(self.rr_val_lbl, qt_label_row_3, 1, Qt.AlignLeft)
-        qtlayout.addWidget(h_lbl, qt_label_row_3, 2, Qt.AlignRight)
-        qtlayout.addWidget(self.h_val_lbl, qt_label_row_3, 3, Qt.AlignLeft)
-        qtlayout.addWidget(qt_lbl, qt_label_row_3, 4, Qt.AlignRight)
-        qtlayout.addWidget(self.qt_val_lbl, qt_label_row_3, 5, Qt.AlignLeft)
-        qtlayout.addWidget(qtc_lbl, qt_label_row_3, 6, Qt.AlignRight)
-        qtlayout.addWidget(self.qtc_val_lbl, qt_label_row_3, 7, Qt.AlignLeft)
-
         # Person
 
         name_lbl = QLabel("Name")
@@ -734,12 +703,180 @@ class MainWindow(QWidget):
 
         # Live analytics
 
-        red_palette = QPalette()
-        red_palette.setColor(QPalette.Foreground, Qt.red)
+        hr_palette = QPalette()
+        hr_palette.setColor(QPalette.Foreground, HR_COLOUR)
 
         hr_static_lbl = QLabel("Average heart rate (bpm)")
         self.hr_lbl = QLabel()
-        self.hr_lbl.setPalette(red_palette)
+        self.hr_lbl.setPalette(hr_palette)
+        
+        # Manual analysis
+        
+        self.toggle_lines_btn = QCheckBox("Show manual lines")
+        self.toggle_lines_btn.stateChanged.connect(self.on_toggle_lines)
+
+        self.reset_lines_btn = QPushButton("Reset manual lines")
+        self.reset_lines_btn.clicked.connect(self.reset_lines)
+
+        self.p_pen = QPen(P_COLOUR, 0, Qt.SolidLine)
+        self.p_line = self.plot_ecg.addLine(
+            x=0, pen=self.p_pen, movable=True,
+            label="P",
+            labelOpts={
+                "position": 0.98,
+                "color": P_COLOUR,
+            }
+        )  # type: InfiniteLine
+        self.p_line.sigPositionChangeFinished.connect(self.p_move)
+
+        self.q_pen = QPen(Q_COLOUR, 0, Qt.SolidLine)
+        self.q_line = self.plot_ecg.addLine(
+            x=0.5, pen=self.q_pen, movable=True,
+            label="Q",
+            labelOpts={
+                "position": 0.96,
+                "color": Q_COLOUR,
+            }
+        )  # type: InfiniteLine
+        self.q_line.sigPositionChangeFinished.connect(self.q_move)
+
+        self.r1_pen = QPen(R1_COLOUR, 0, Qt.SolidLine)
+        self.r1_line = self.plot_ecg.addLine(
+            x=1, pen=self.r1_pen, movable=True,
+            label="R1",
+            labelOpts={
+                "position": 0.94,
+                "color": R1_COLOUR,
+            }
+        )  # type: InfiniteLine
+        self.r1_line.sigPositionChangeFinished.connect(self.r1_move)
+
+        self.s_pen = QPen(S_COLOUR, 0, Qt.SolidLine)
+        self.s_line = self.plot_ecg.addLine(
+            x=1.5, pen=self.s_pen, movable=True,
+            label="S",
+            labelOpts={
+                "position": 0.92,
+                "color": S_COLOUR,
+            }
+        )  # type: InfiniteLine
+        self.s_line.sigPositionChangeFinished.connect(self.s_move)
+
+        self.t_pen = QPen(T_COLOUR, 0, Qt.SolidLine)
+        self.t_line = self.plot_ecg.addLine(
+            x=2, pen=self.t_pen, movable=True,
+            label="T",
+            labelOpts={
+                "position": 0.9,
+                "color": T_COLOUR,
+            }
+        )  # type: InfiniteLine
+        self.t_line.sigPositionChangeFinished.connect(self.t_move)
+
+        self.r2_pen = QPen(R2_COLOUR, 0, Qt.SolidLine)
+        self.r2_line = self.plot_ecg.addLine(
+            x=2.5, pen=self.r2_pen, movable=True,
+            label="R2",
+            labelOpts={
+                "position": 0.88,
+                "color": R2_COLOUR,
+            }
+        )  # type: InfiniteLine
+        self.r2_line.sigPositionChangeFinished.connect(self.r2_move)
+
+        p_lbl = QLabel('P start = ')
+        self.p_val_lbl = QLabel('0')
+        p_palette = QPalette()
+        p_palette.setColor(QPalette.Foreground, P_COLOUR)
+        p_lbl.setPalette(p_palette)
+
+        r1_lbl = QLabel('R1 peak = ')
+        self.r1_val_lbl = QLabel('0')
+        r1_palette = QPalette()
+        r1_palette.setColor(QPalette.Foreground, R1_COLOUR)
+        r1_lbl.setPalette(r1_palette)
+
+        r2_lbl = QLabel('R2 peak = ')
+        self.r2_val_lbl = QLabel('0')
+        r2_palette = QPalette()
+        r2_palette.setColor(QPalette.Foreground, R2_COLOUR)
+        r2_lbl.setPalette(r2_palette)
+
+        q_lbl = QLabel('Q (QRS start) = ')
+        self.q_val_lbl = QLabel('0')
+        q_palette = QPalette()
+        q_palette.setColor(QPalette.Foreground, Q_COLOUR)
+        q_lbl.setPalette(q_palette)
+
+        s_lbl = QLabel('S (QRS end) = ')
+        self.s_val_lbl = QLabel('0')
+        s_palette = QPalette()
+        s_palette.setColor(QPalette.Foreground, S_COLOUR)
+        s_lbl.setPalette(s_palette)
+
+        t_lbl = QLabel('T end = ')
+        self.t_val_lbl = QLabel('0')
+        t_palette = QPalette()
+        t_palette.setColor(QPalette.Foreground, T_COLOUR)
+        t_lbl.setPalette(t_palette)
+
+        rr_lbl = QLabel('RR (s) = ')
+        self.rr_val_lbl = QLabel('0')
+
+        h_lbl = QLabel('Heart rate (bpm) = ')
+        self.h_val_lbl = QLabel('0')
+
+        pr_lbl = QLabel('PQ (PR) (s) = ')
+        self.pr_val_lbl = QLabel('0')
+
+        qrs_lbl = QLabel('QRS (s) = ')
+        self.qrs_val_lbl = QLabel('0')
+
+        qt_lbl = QLabel('QT (s) = ')
+        self.qt_val_lbl = QLabel('0')
+
+        qtc_lbl = QLabel('QTc, Bazett formula (s) = ')
+        self.qtc_val_lbl = QLabel('0')
+
+        manual_qt_label = QLabel(
+            "MANUAL measurement of RR and QT intervals (drag the vertical "
+            "lines; values ONLY reflect what you have set)")
+
+        qtlayout = QGridLayout()
+        qt_label_row_1 = 1
+        qt_label_row_2 = 2
+        qt_label_row_3 = 3
+        qt_label_row_4 = 4
+        qt_label_row_5 = 5
+        qtlayout.addWidget(manual_qt_label, qt_label_row_1, 0, 1, 6)
+
+        qtlayout.addWidget(r1_lbl, qt_label_row_2, 0, Qt.AlignRight)
+        qtlayout.addWidget(self.r1_val_lbl, qt_label_row_2, 1, Qt.AlignLeft)
+        qtlayout.addWidget(r2_lbl, qt_label_row_2, 2, Qt.AlignRight)
+        qtlayout.addWidget(self.r2_val_lbl, qt_label_row_2, 3, Qt.AlignLeft)
+
+        qtlayout.addWidget(p_lbl, qt_label_row_3, 0, Qt.AlignRight)
+        qtlayout.addWidget(self.p_val_lbl, qt_label_row_3, 1, Qt.AlignLeft)
+        qtlayout.addWidget(q_lbl, qt_label_row_3, 2, Qt.AlignRight)
+        qtlayout.addWidget(self.q_val_lbl, qt_label_row_3, 3, Qt.AlignLeft)
+        qtlayout.addWidget(s_lbl, qt_label_row_3, 4, Qt.AlignRight)
+        qtlayout.addWidget(self.s_val_lbl, qt_label_row_3, 5, Qt.AlignLeft)
+        qtlayout.addWidget(t_lbl, qt_label_row_3, 6, Qt.AlignRight)
+        qtlayout.addWidget(self.t_val_lbl, qt_label_row_3, 7, Qt.AlignLeft)
+
+        qtlayout.addWidget(rr_lbl, qt_label_row_4, 0, Qt.AlignRight)
+        qtlayout.addWidget(self.rr_val_lbl, qt_label_row_4, 1, Qt.AlignLeft)
+        qtlayout.addWidget(h_lbl, qt_label_row_4, 2, Qt.AlignRight)
+        qtlayout.addWidget(self.h_val_lbl, qt_label_row_4, 3, Qt.AlignLeft)
+
+        qtlayout.addWidget(pr_lbl, qt_label_row_5, 0, Qt.AlignRight)
+        qtlayout.addWidget(self.pr_val_lbl, qt_label_row_5, 1, Qt.AlignLeft)
+        qtlayout.addWidget(qrs_lbl, qt_label_row_5, 2, Qt.AlignRight)
+        qtlayout.addWidget(self.qrs_val_lbl, qt_label_row_5, 3, Qt.AlignLeft)
+        qtlayout.addWidget(qt_lbl, qt_label_row_5, 4, Qt.AlignRight)
+        qtlayout.addWidget(self.qt_val_lbl, qt_label_row_5, 5, Qt.AlignLeft)
+        qtlayout.addWidget(qtc_lbl, qt_label_row_5, 6, Qt.AlignRight)
+        qtlayout.addWidget(self.qtc_val_lbl, qt_label_row_5, 7, Qt.AlignLeft)
 
         # Layout
 
@@ -815,47 +952,100 @@ class MainWindow(QWidget):
         layout.addWidget(hr_static_lbl, summary_hr_row, 0)
         layout.addWidget(self.hr_lbl, summary_hr_row, 1)
 
-        qt_summary_row = summary_hr_row + 1
+        toggle_lines_row = summary_hr_row + 1
+        layout.addWidget(self.toggle_lines_btn, toggle_lines_row, 0)
+        layout.addWidget(self.reset_lines_btn, toggle_lines_row, 1)
+
+        qt_summary_row = toggle_lines_row + 1
         n_qt_rows = 3
         layout.addLayout(qtlayout, qt_summary_row, 0, n_qt_rows, 5)
 
         self.setLayout(layout)
         self.set_defaults(trigger_ecg_update=False)
+        self.on_toggle_lines()
+        
+    def on_toggle_lines(self) -> None:
+        wanted = self.toggle_lines_btn.isChecked()
+        self.p_line.setVisible(wanted)
+        self.q_line.setVisible(wanted)
+        self.r1_line.setVisible(wanted)
+        self.s_line.setVisible(wanted)
+        self.t_line.setVisible(wanted)
+        self.r2_line.setVisible(wanted)
 
-    def r1_move(self):
+    def reset_lines(self) -> None:
+        ax = self.plot_ecg.getAxis("bottom")
+        left, right = ax.range
+        width = right - left
+        self.p_line.setValue(left + 0.05 * width)
+        self.q_line.setValue(left + 0.1 * width)
+        self.r1_line.setValue(left + 0.15 * width)
+        self.s_line.setValue(left + 0.2 * width)
+        self.t_line.setValue(left + 0.25 * width)
+        self.r2_line.setValue(left + 0.3 * width)
+        self.p_move()
+        self.q_move()
+        self.r1_move()
+        self.s_move()
+        self.t_move()
+        self.r2_move()
+
+    def p_move(self) -> None:
+        p = self.p_line.value()
+        self.p_val_lbl.setText(str("%.3f" % p))
+        self.calc_qtc()
+
+    def r1_move(self) -> None:
         r1 = self.r1_line.value()
         self.r1_val_lbl.setText(str("%.3f" % r1))
         self.calc_qtc()
 
-    def r2_move(self):
+    def r2_move(self) -> None:
         r2 = self.r2_line.value()
         self.r2_val_lbl.setText(str("%.3f" % r2))
         self.calc_qtc()
 
-    def q_move(self):
+    def q_move(self) -> None:
         q = self.q_line.value()
         self.q_val_lbl.setText(str("%.3f" % q))
         self.calc_qtc()
 
-    def t_move(self):
+    def s_move(self) -> None:
+        s = self.s_line.value()
+        self.s_val_lbl.setText(str("%.3f" % s))
+        self.calc_qtc()
+
+    def t_move(self) -> None:
         t = self.t_line.value()
         self.t_val_lbl.setText(str("%.3f" % t))
         self.calc_qtc()
 
-    def calc_qtc(self):
+    def calc_qtc(self) -> None:
+        p = self.p_line.value()
         r1 = self.r1_line.value()
         r2 = self.r2_line.value()
         q = self.q_line.value()
+        s = self.s_line.value()
         t = self.t_line.value()
 
+        # R-R interval: from one R wave to the next (= interbeat interval)
         rr_s = r2 - r1
         self.rr_val_lbl.setText(str("%.3f" % rr_s))
 
         hr_bpm = 60 / rr_s
         self.h_val_lbl.setText(str("%.3f" % hr_bpm))
 
-        qt_s = (t - q)
+        # Q-T interval: from the start of the QRS complex to the end of the T wave  # noqa
+        qt_s = t - q
         self.qt_val_lbl.setText(str("%.3f" % qt_s))
+
+        # P-Q ("P-R") interval: from the start of the P to the start of the QRS
+        pq_s = q - p
+        self.pr_val_lbl.setText(str("%.3f" % pq_s))
+
+        # QRS width: from the start of the QRS complex to its end
+        qrs_s = s - q
+        self.qrs_val_lbl.setText(str("%.3f" % qrs_s))
 
         try:
             # Bazett formula:
@@ -1851,8 +2041,8 @@ class EcgController(QObject):
             ydata = self.get_data(prefilter=prefilter)
         filename_stem = "ecg"
         filename_with_ext = filename_stem + ".wav"
-        with TemporaryDirectory() as dir:
-            filename = os.path.join(dir, filename_with_ext)
+        with TemporaryDirectory() as tempdir:
+            filename = os.path.join(tempdir, filename_with_ext)
             sampling_freq_hz = int(self.sampling_freq_hz)
             if sampling_freq_hz != self.sampling_freq_hz:
                 log.warning(
@@ -1872,9 +2062,12 @@ class EcgController(QObject):
 
     @property
     def qt_segmentation_pipeline(self):
+        assert self.qt_pipeline_filename, "Need pipeline filename!"
         if self._qt_segmentation_pipeline is None:
             if not os.path.exists(self.qt_pipeline_filename):
+                # -------------------------------------------------------------
                 # Train one. This can be slow.
+                # -------------------------------------------------------------
                 # https://github.com/analysiscenter/cardio/blob/master/tutorials/III.Models.ipynb  # noqa
                 log.warning("Training QT processing pipeline")
                 signals_mask = os.path.join(self.qtdb_dir, "*.hea")
@@ -1889,11 +2082,50 @@ class EcgController(QObject):
                 log.info("Saving QT pipeline to {!r}".format(
                     self.qt_pipeline_filename))
                 ppl_train.save_model("HMM", path=self.qt_pipeline_filename)
+
+            # -----------------------------------------------------------------
             # Load a pre-trained pipeline
+            # -----------------------------------------------------------------
             log.info("Loading QT pipeline from {!r}".format(
                 self.qt_pipeline_filename))
-            self._qt_segmentation_pipeline = hmm_predict_pipeline(
-                self.qt_pipeline_filename, annot=HMM_ANNOTATION)
+            # Default method -- but the hmm_predict_pipeline() function creates
+            # a pipeline that insists on "wfdb" format, and we want "wav".
+            #
+            # self._qt_segmentation_pipeline = hmm_predict_pipeline(
+            #     self.qt_pipeline_filename, annot=HMM_ANNOTATION)
+            #
+            # Instead:
+            model_path = self.qt_pipeline_filename
+            batch_size = 20
+            features = "hmm_features"
+            channel_ix = 0
+            annot = HMM_ANNOTATION
+            model_name = "HMM"
+
+            config_predict = {
+                'build': False,
+                'load': {'path': model_path}
+            }
+            self._qt_segmentation_pipeline = (
+                Pipeline()
+                    .init_model("static", HMModel, model_name,
+                                config=config_predict)
+                    .load(fmt="wav", components=["signal", "meta"])
+                    .cwt(src="signal", dst=features, scales=[4, 8, 16],
+                         wavelet="mexh")
+                    .standardize(axis=-1, src=features, dst=features)
+                    .predict_model(model_name,
+                                   make_data=partial(prepare_hmm_input,
+                                                     features=features,
+                                                     channel_ix=channel_ix),
+                                   save_to=B(annot), mode='w')
+                    .calc_ecg_parameters(src=annot)
+                    .run(batch_size=batch_size, shuffle=False, drop_last=False,
+                         n_epochs=1, lazy=True)
+            )
+
+            log.info("... loaded")
+
         return self._qt_segmentation_pipeline
 
 

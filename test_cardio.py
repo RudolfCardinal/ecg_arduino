@@ -28,6 +28,7 @@ from cardinal_pythonlib.logs import main_only_quicksetup_rootlogger
 
 from ecg_python.ecg import (
     DEFAULT_QTDB_DIR,
+    DEFAULT_QT_PROCESSOR,
     EcgController,
 )
 
@@ -46,10 +47,17 @@ def test_cardio() -> None:
         help="Root directory of the Physionet 'qtdb' database of annotated "
              "QT intervals, to train our QT parser"
     )
+    parser.add_argument(
+        "--qt_pipeline", type=str, default=DEFAULT_QT_PROCESSOR,
+        help="Saved QT processing pipeline"
+    )
     args = parser.parse_args()
     log.critical("qtdb_dir: {!r}".format(args.qtdb_dir))
 
-    c = EcgController(qtdb_dir=args.qtdb_dir)
+    c = EcgController(
+        qtdb_dir=args.qtdb_dir,
+        qt_pipeline_filename=args.qt_pipeline,
+    )
     c.load_json(args.filename)
     i = c.get_biosppy_ecg_info()
     x = c.get_cardio_ecg_info(show_ecg=True, prefilter=True)
